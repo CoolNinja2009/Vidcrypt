@@ -155,3 +155,5 @@ defunct/
 !builder/**
 !main_encoder.c
 !main_decoder.c
+
+decoded_data
