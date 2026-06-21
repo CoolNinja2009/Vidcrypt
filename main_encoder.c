@@ -17,7 +17,7 @@ static void print_usage(void) {
     printf("  -m, --margin <px>        Margin (default: %d)\n", DEFAULT_MARGIN_X);
     printf("  -b, --block-size <px>    Block size   (default: %d)\n", DEFAULT_BLOCK_SIZE);
     printf("  -r, --rs <n>             RS ECC symbols: 32, 16, 8, 0 (default: %d)\n", DEFAULT_RS_ECC_SYMBOLS);
-    printf("  -f, --fps <n>            Frames per second (default: 15.0)\n");
+    printf("  -f, --fps <n>            Frames per second (default: 30.0)\n");
     printf("  -j, --workers <n>        Number of worker threads (default: 4)\n");
     printf("  -c, --codec <name>       FFmpeg codec name (default: ffv1)\n");
     printf("  -h, --help               Show this help\n");
