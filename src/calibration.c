@@ -186,6 +186,23 @@ bool extract_calibration(const uint8_t *gray, int width, int height,
     int n = read_calibration_dots(gray, width, height, bits);
     if (n >= 192 && interpret_calibration_bits(bits, params))
         return true;
+
+    /* ── Single-bit error correction (NVDEC tolerance) ──────────────
+     * Hardware decoders like NVDEC don't produce bit-exact output.
+     * Even with CRF 10 lossy H.264, small pixel differences can flip
+     * 1-2 calibration dots (out of 192). The 16-bit CRC rejects the
+     * entire calibration if even 1 bit is wrong.
+     *
+     * Brute-force: try flipping each of the 192 bits and re-check
+     * the CRC. This is fast (192 iterations, microsecond-scale) and
+     * corrects any single-bit error introduced by NVDEC. */
+    for (int flip = 0; flip < 192; ++flip) {
+        bits[flip] ^= 1;
+        if (interpret_calibration_bits(bits, params))
+            return true;
+        bits[flip] ^= 1; /* restore */
+    }
+
     cal_params_legacy_defaults(params);
     return false;
 }

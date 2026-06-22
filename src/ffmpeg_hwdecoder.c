@@ -346,13 +346,65 @@ bool ffmpeg_hwdecoder_read_frame(FfmpegHwDecoder *dec,
             dec->frame_count_actual++;
 
             if (dec->is_hardware && dec->frame->format == dec->hw_pix_fmt) {
-                /* Hardware frame: extract CUdeviceptr from data[0].
-                 * For AV_PIX_FMT_CUDA, data[0] IS a CUdeviceptr to
-                 * the NV12 Y-plane in GPU memory. */
-                *y_plane_out = (uint8_t *)dec->frame->data[0];
-                *pitch_out    = dec->frame->linesize[0];
+                /* ── Hardware frame: download from tiled to linear ──
+                 * On modern NVIDIA GPUs (RTX 50-series Blackwell and
+                 * newer), NVDEC stores decoded frames in a tiled/
+                 * block-linear memory layout for texture cache
+                 * efficiency. Reading the CUdeviceptr linearly
+                 * produces garbage pixel data.
+                 *
+                 * Use av_hwframe_transfer_data() to download from
+                 * the GPU hardware surface to a software AVFrame in
+                 * system memory. This handles the tile→linear
+                 * conversion correctly. The result is standard NV12
+                 * format (Y-plane at data[0], UV interleaved at
+                 * data[1]) in linear CPU memory. */
+                av_frame_unref(dec->sw_frame);
+                /* Use the decoder's software pixel format for the download.
+                 * For 8-bit H.264 this is AV_PIX_FMT_NV12. */
+                enum AVPixelFormat sw_fmt = dec->decoder_ctx->sw_pix_fmt;
+                if (sw_fmt == AV_PIX_FMT_NONE) sw_fmt = AV_PIX_FMT_NV12;
+                dec->sw_frame->format = sw_fmt;
+                dec->sw_frame->width  = dec->frame->width;
+                dec->sw_frame->height = dec->frame->height;
+
+                /* Pre-allocate frame buffer to ensure proper setup */
+                if (av_frame_get_buffer(dec->sw_frame, 0) < 0) {
+                    fprintf(stderr, "NVDEC: sw_frame buffer alloc failed\n");
+                    dec->is_hardware = false;
+                    av_frame_unref(dec->frame);
+                    continue;
+                }
+
+                /* Ensure CUDA context is current before transfer */
+                cuCtxSetCurrent(dec->cuda_ctx);
+
+                int dl_ret = av_hwframe_transfer_data(dec->sw_frame,
+                                                       dec->frame, 0);
+                if (dl_ret < 0) {
+                    log_ffmpeg_error("av_hwframe_transfer_data", dl_ret);
+                    dec->is_hardware = false;
+                    av_frame_unref(dec->frame);
+                    continue;
+                }
+
+                /* Verify data arrived */
+                if (!dec->sw_frame->data[0]) {
+                    fprintf(stderr, "NVDEC: hwdownload produced NULL data\n");
+                    dec->is_hardware = false;
+                    av_frame_unref(dec->frame);
+                    continue;
+                }
+
+                /* Return linear NV12 Y-plane from software frame.
+                 * The Y-plane IS grayscale (luma data). pitch may be
+                 * greater than width (alignment padding). */
+                *y_plane_out = dec->sw_frame->data[0];
+                *pitch_out    = dec->sw_frame->linesize[0];
                 *width_out    = dec->frame->width;
                 *height_out   = dec->frame->height;
+
+                av_frame_unref(dec->frame);
                 return true;
             } else {
                 /* Software frame: upload to CUDA fallback buffer.

@@ -35,6 +35,26 @@ bool precomputed_frame_init(PrecomputedFrame *pf, const CalParams *params) {
             memset(pf->work + yy * pf->stride + x, val, (size_t)pf->block_size);
     }
 
+    /* Write corner markers (8×8 checkerboard for decoder self-alignment).
+     * Pattern alternates black/white pixels — unmistakable even after
+     * lossy compression since half the pixels are 0 and half are 255.
+     * Placed at all 4 frame corners in the margin area (outside grid),
+     * preserved across frame generations since only the payload region
+     * is cleared each frame. */
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            uint8_t val = ((x + y) & 1) ? 255 : 0;
+            /* Top-left */
+            pf->work[(size_t)y * pf->stride + (size_t)x] = val;
+            /* Top-right */
+            pf->work[(size_t)y * pf->stride + (size_t)(pf->width - 8 + x)] = val;
+            /* Bottom-left */
+            pf->work[(size_t)(pf->height - 8 + y) * pf->stride + (size_t)x] = val;
+            /* Bottom-right */
+            pf->work[(size_t)(pf->height - 8 + y) * pf->stride + (size_t)(pf->width - 8 + x)] = val;
+        }
+    }
+
     return true;
 }
 

@@ -91,6 +91,7 @@ char *find_ffmpeg_binary(const char *hint, const char *name) {
         "C:\\Program Files (x86)\\ffmpeg\\bin",
         "C:\\ffmpeg\\bin",
         "C:\\tools\\ffmpeg\\bin",
+        "C:\\Users\\cooln\\Documents\\ffmpeg-master-latest-win64-lgpl-shared\\bin",
         NULL
 #else
         "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin", NULL
@@ -162,6 +163,52 @@ struct VideoReader {
     uint8_t *frame_buf;
     int     frame_size;
 };
+
+VideoReader *video_reader_open_nvdec(const char *path, const char *ffmpeg_path) {
+    char *ffmpeg  = find_ffmpeg_binary(ffmpeg_path, "ffmpeg");
+    char *ffprobe = find_ffmpeg_binary(ffmpeg_path, "ffprobe");
+    if (!ffmpeg)  { set_error("ffmpeg not found"); free(ffprobe); return NULL; }
+    if (!ffprobe) { set_error("ffprobe not found"); free(ffmpeg); return NULL; }
+
+    ProbeResult probe;
+    if (probe_video(ffprobe, path, &probe) < 0) { free(ffmpeg); free(ffprobe); return NULL; }
+
+    VideoReader *vr = (VideoReader *)calloc(1, sizeof(VideoReader));
+    if (!vr) { free(ffmpeg); free(ffprobe); set_error("Out of memory"); return NULL; }
+
+    vr->ffmpeg_path = ffmpeg;
+    vr->width       = probe.width;
+    vr->height      = probe.height;
+    vr->stride      = probe.width;
+    vr->fps         = probe.fps;
+    vr->frame_count = probe.frame_count;
+    vr->frame_size  = probe.width * probe.height;
+
+    vr->frame_buf = (uint8_t *)malloc((size_t)vr->frame_size);
+    if (!vr->frame_buf) { video_reader_close(vr); free(ffprobe); set_error("Out of memory"); return NULL; }
+
+    /* ffmpeg -c:v h264_cuvid -i <input> -f rawvideo -pix_fmt gray -an -sn -dn -
+     * Uses NVDEX CUVID hardware decoder for H.264. Note: -hwaccel cuda is NOT
+     * used here because it conflicts with -c:v h264_cuvid (both try to manage
+     * CUDA resources, causing crashes). -c:v h264_cuvid alone is sufficient. */
+    char cmd[8192];
+    int n;
+    if (strchr(ffmpeg, ' ') || strchr(path, ' '))
+        n = snprintf(cmd, sizeof(cmd),
+                     "\"%s\" -c:v h264_cuvid -i \"%s\" -f rawvideo -pix_fmt gray -an -sn -dn -",
+                     ffmpeg, path);
+    else
+        n = snprintf(cmd, sizeof(cmd),
+                     "%s -c:v h264_cuvid -i \"%s\" -f rawvideo -pix_fmt gray -an -sn -dn -",
+                     ffmpeg, path);
+    if ((size_t)n >= sizeof(cmd)) { video_reader_close(vr); free(ffprobe); set_error("Command too long"); return NULL; }
+
+    vr->pipe = popen(cmd, "rb");
+    if (!vr->pipe) { video_reader_close(vr); free(ffprobe); set_error("Failed to launch ffmpeg: %s", strerror(errno)); return NULL; }
+
+    free(ffprobe);
+    return vr;
+}
 
 VideoReader *video_reader_open(const char *path, const char *ffmpeg_path) {
     char *ffmpeg  = find_ffmpeg_binary(ffmpeg_path, "ffmpeg");
@@ -298,17 +345,27 @@ VideoWriter *video_writer_create(const char *ffmpeg_path,
     vw->height      = height;
     vw->frame_size  = width * height;  /* gray8: w*h */
 
-    /* ffmpeg -y -f rawvideo -pix_fmt gray8 -s <WxH> -r <fps> -i - -c <codec> -an <output> */
+    /* Build ffmpeg command with codec and quality options.
+     * For H.264 we use high-quality lossy encoding (-crf 10 -preset fast)
+     * because NVDEC hardware decoders DO NOT support lossless H.264
+     * (transform-bypass / QP 0 mode). CRF 10 is visually lossless with
+     * sharp tile edges preserved — any pixel-level errors are handled
+     * by RS(255,223,32) ECC which corrects up to 16 bytes per block.
+     * Other codecs (ffv1) are inherently lossless. */
+    char quality[64] = "";
+    if (strcmp(codec_name, "h264") == 0 || strcmp(codec_name, "libx264") == 0)
+        snprintf(quality, sizeof(quality), " -crf 10 -preset fast");
+
     char cmd[8192];
     int n;
     if (strchr(ffmpeg, ' ') || strchr(path, ' '))
         n = snprintf(cmd, sizeof(cmd),
-                     "\"%s\" -y -f rawvideo -pix_fmt gray -s %dx%d -r %.2f -i - -c %s -pix_fmt gray -an \"%s\"",
-                     ffmpeg, width, height, fps, codec_name, path);
+                     "\"%s\" -y -f rawvideo -pix_fmt gray -s %dx%d -r %.2f -i - -c %s%s -pix_fmt gray -an \"%s\"",
+                     ffmpeg, width, height, fps, codec_name, quality, path);
     else
         n = snprintf(cmd, sizeof(cmd),
-                     "%s -y -f rawvideo -pix_fmt gray -s %dx%d -r %.2f -i - -c %s -pix_fmt gray -an \"%s\"",
-                     ffmpeg, width, height, fps, codec_name, path);
+                     "%s -y -f rawvideo -pix_fmt gray -s %dx%d -r %.2f -i - -c %s%s -pix_fmt gray -an \"%s\"",
+                     ffmpeg, width, height, fps, codec_name, quality, path);
     if ((size_t)n >= sizeof(cmd)) { video_writer_close(vw); set_error("Command too long"); return NULL; }
 
     vw->pipe = popen(cmd, "wb");

@@ -16,6 +16,12 @@ typedef struct VideoReader VideoReader;
  * Each frame is width * height bytes (1 byte per pixel, grayscale). */
 VideoReader *video_reader_open(const char *path, const char *ffmpeg_path);
 
+/* Open with NVDEC hardware acceleration (-hwaccel cuda -c:v h264_cuvid).
+ * Requires a CUDA-capable ffmpeg binary with cuvid decoders.
+ * Falls back to software decode if hwaccel init fails.
+ * Note: Only works for H.264 content (the most common case). */
+VideoReader *video_reader_open_nvdec(const char *path, const char *ffmpeg_path);
+
 /* Open with optional output scale. If target_width>0 and target_height>0,
  * adds -vf scale=W:H to upscale/downscale to the target resolution.
  * Useful when YouTube has re-encoded at a different resolution. */

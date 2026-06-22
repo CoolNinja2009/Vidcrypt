@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "encoder.h"
+#include "logutil.h"
 
 static void print_usage(void) {
     printf("vidcrypt-encoder v4 — Encode a file to video (CPU, gray8)\n");
@@ -79,6 +80,19 @@ int main(int argc, char **argv) {
 
     snprintf(config.output_path, sizeof(config.output_path), "%s", output_path);
 
+    log_init();
+
+    LOG_SEPARATOR("VIDCRYPT ENCODE SESSION");
+    LOG_INFO("Input: %s", input_path);
+    LOG_INFO("Output: %s", output_path);
+    LOG_INFO("Codec: %s", config.codec_name ? config.codec_name : "ffv1");
+    LOG_METRIC("config.width",      (double)config.frame_width);
+    LOG_METRIC("config.height",     (double)config.frame_height);
+    LOG_METRIC("config.block_size", (double)config.block_size);
+    LOG_METRIC("config.rs",         (double)config.rs_ecc_symbols);
+    LOG_METRIC("config.fps",        config.fps);
+    LOG_METRIC("config.workers",    (double)config.num_workers);
+
     EncoderResult result;
     char error_msg[256];
     error_msg[0] = '\0';
@@ -89,8 +103,13 @@ int main(int argc, char **argv) {
            config.frame_width, config.frame_height,
            config.block_size, config.rs_ecc_symbols, config.fps, config.num_workers);
 
+    LOG_INFO("Starting encode pipeline...");
+
     if (!encoder_encode_file(input_path, &config, &result, error_msg, sizeof(error_msg))) {
         fprintf(stderr, "Error: %s\n", error_msg);
+        LOG_ERROR("Encode failed: %s", error_msg);
+        LOG_METRIC("encode.failed", 1.0);
+        log_close();
         return 1;
     }
 
@@ -100,6 +119,16 @@ int main(int argc, char **argv) {
     printf("Payload: %lld bytes\n", (long long)result.total_bytes_written);
     printf("Time: %.2f seconds\n", result.elapsed_sec);
     printf("Throughput: %.1f fps\n", result.fps);
+
+    LOG_SEPARATOR("ENCODE COMPLETE");
+    LOG_INFO("Output: %s", result.output_path);
+    LOG_METRIC("frames.total",     (double)result.total_frames);
+    LOG_METRIC("bytes.written",    (double)result.total_bytes_written);
+    LOG_METRIC("elapsed.sec",      result.elapsed_sec);
+    LOG_METRIC("throughput.fps",   result.fps);
+    LOG_METRIC("encode.complete",  1.0);
+
+    log_close();
 
     return 0;
 }

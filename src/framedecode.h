@@ -32,6 +32,20 @@ bool decode_sync_check(const DecodeGeometry *geom, const uint8_t *gray, int stri
 int decode_payload_tiles(const DecodeGeometry *geom, const uint8_t *gray, int stride,
                          uint8_t *bits, int max_bits);
 
+/* ── Frame offset detection for self-alignment ────────────────────── */
+
+typedef struct {
+    int dx;            /* horizontal pixel offset (positive = content shifted right) */
+    int dy;            /* vertical pixel offset (positive = content shifted down) */
+    int confidence;    /* 0-100: confidence in the detected offset */
+} FrameOffset;
+
+/* Detect frame alignment offset from corner markers.
+ * Scans ±2 pixels around each expected 8×8 checkerboard marker position.
+ * Returns detected offset, or {0,0,0} if markers not found (new videos
+ * without markers, or non-vidcrypt content). */
+FrameOffset detect_frame_offset(const uint8_t *gray, int width, int height, int stride);
+
 /* Decode bits from a grayscale frame using precomputed geometry.
  * gray: gray8 frame data (stride = width, 1 byte per pixel). */
 void decode_frame_bits(const uint8_t *gray, int width, int height, int stride,

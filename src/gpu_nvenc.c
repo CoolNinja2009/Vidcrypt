@@ -4,11 +4,12 @@
 #include <string.h>
 #include <errno.h>
 
-#ifdef USE_CUDA
+#if defined(USE_CUDA) && defined(HAS_NVENC)
 
-#include <cuda.h>
-#include <cuda_runtime.h>
-#include <nvEncodeAPI.h>
+#  include <cuda.h>
+#  include <cuda_runtime.h>
+#  include <nvEncodeAPI.h>
+
 #include "gpu_kernels.h"
 
 /* Platform-specific dynamic library loading */
@@ -667,6 +668,35 @@ int64_t gpu_nvenc_encoded_bytes(GpuNvencEncoder *enc) {
 int gpu_nvenc_encoded_frames(GpuNvencEncoder *enc) {
     return enc ? enc->total_encoded_frames : 0;
 }
+
+#elif defined(USE_CUDA) && !defined(HAS_NVENC)
+/* ─── CUDA compiled but NVENC header unavailable — stubs ───────── */
+
+GpuNvencEncoder* gpu_nvenc_create(int width, int height, double fps,
+                                   int cuda_device, int bitrate,
+                                   int gop_length,
+                                   char *error_out, int error_size) {
+    (void)width; (void)height; (void)fps; (void)cuda_device;
+    (void)bitrate; (void)gop_length;
+    if (error_out) snprintf(error_out, (size_t)error_size, "NVENC not available (install NVIDIA Video Codec SDK)");
+    return NULL;
+}
+
+void gpu_nvenc_destroy(GpuNvencEncoder *enc) { (void)enc; }
+
+int gpu_nvenc_encode_frame(GpuNvencEncoder *enc,
+                            const uint8_t *frame, int stride) {
+    (void)enc; (void)frame; (void)stride; return -1;
+}
+
+int gpu_nvenc_get_packet(GpuNvencEncoder *enc, const uint8_t **p) {
+    (void)enc; if (p) *p = NULL; return 0;
+}
+
+int gpu_nvenc_flush(GpuNvencEncoder *enc) { (void)enc; return -1; }
+
+int64_t gpu_nvenc_encoded_bytes(GpuNvencEncoder *enc) { (void)enc; return 0; }
+int gpu_nvenc_encoded_frames(GpuNvencEncoder *enc) { (void)enc; return 0; }
 
 #else /* !USE_CUDA — stubs */
 

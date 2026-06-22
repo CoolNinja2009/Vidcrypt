@@ -139,6 +139,32 @@ bool gpu_backend_read_calibration(GpuBackend *backend,
                                    int width, int height,
                                    uint32_t *d_cal_data_out);
 
+/* ─── CPU grayscale upload / download ─────────────────────────────── */
+
+/* Upload a CPU grayscale frame to the GPU working buffer for kernel processing.
+ * 'gray': host pointer to grayscale data (width * height bytes).
+ * 'stride': bytes per row (typically = width for tightly packed grayscale).
+ * 'width', 'height': frame dimensions.
+ * Returns device pointer to uploaded frame, or NULL on failure.
+ * The returned pointer is valid until the next upload or gpu_backend_destroy. */
+uint8_t* gpu_backend_upload_gray(GpuBackend *backend,
+                                  const uint8_t *gray, int stride,
+                                  int width, int height);
+
+/* Download a GPU grayscale frame to CPU memory.
+ * 'd_gray': device pointer to grayscale data (must belong to this backend).
+ * 'gray_stride': bytes per row on GPU (typically = width).
+ * 'width', 'height': frame dimensions.
+ * 'h_dst': host destination buffer (must be at least width * height bytes).
+ * 'dst_stride': bytes per row in host buffer.
+ * The copy is queued on the decode stream — call gpu_backend_sync_decode()
+ * before reading the host buffer.
+ * Returns true on success. */
+bool gpu_backend_download_gray(GpuBackend *backend,
+                                const uint8_t *d_gray, int gray_stride,
+                                int width, int height,
+                                uint8_t *h_dst, int dst_stride);
+
 /* ─── Synchronization ─────────────────────────────────────────────── */
 
 /* Ensure all pending GPU work is complete */
@@ -150,6 +176,10 @@ void gpu_backend_sync_encode(GpuBackend *backend);
 
 /* Sync only the decode stream. Call before reading decode results on CPU. */
 void gpu_backend_sync_decode(GpuBackend *backend);
+
+/* Get the decode stream handle (for external synchronization).
+ * Returns opaque cudaStream_t as void*. */
+void* gpu_backend_get_decode_stream(GpuBackend *backend);
 
 #ifdef __cplusplus
 }

@@ -5,6 +5,7 @@
 
 #ifdef USE_CUDA
 
+#include <cuda.h>
 #include <cuda_runtime.h>
 #include "gpu_kernels.h"
 #include "gpu_presets.h"
@@ -92,10 +93,24 @@ GpuStatus gpu_backend_init(GpuBackend **backend, int device_id,
 
     cudaError_t e;
 
-    e = cudaSetDevice(device_id);
-    if (e != cudaSuccess) {
-        if (error_out) snprintf(error_out, (size_t)error_size, "cudaSetDevice: %s", cudaGetErrorString(e));
-        free(b); return GPU_ERR_NO_DEVICE;
+    /* ── CUDA context: adopt FFmpeg's context or create new ──────────
+     * If ffmpeg_hwdecoder has already created a CUDA context (via Driver
+     * API av_hwdevice_ctx_create), it's current from the cuCtxSetCurrent
+     * call in ffmpeg_hwdecoder_open(). We skip cudaSetDevice to avoid
+     * creating a SEPARATE primary context — all Runtime API calls
+     * (cudaMalloc, cudaStreamCreate) will use the existing context.
+     *
+     * If no existing context (CPU fallback), create via cudaSetDevice. */
+    CUcontext existing_ctx = NULL;
+    if (cuCtxGetCurrent(&existing_ctx) == CUDA_SUCCESS && existing_ctx != NULL) {
+        /* FFmpeg's context is current. Skip cudaSetDevice to adopt it.
+         * All subsequent cudaMalloc/cudaStreamCreate use this context. */
+    } else {
+        e = cudaSetDevice(device_id);
+        if (e != cudaSuccess) {
+            if (error_out) snprintf(error_out, (size_t)error_size, "cudaSetDevice: %s", cudaGetErrorString(e));
+            free(b); return GPU_ERR_NO_DEVICE;
+        }
     }
 
     e = cudaGetDeviceProperties(&b->prop, device_id);
@@ -540,6 +555,40 @@ bool gpu_backend_write_frame(GpuBackend *b,
     return result >= 0;
 }
 
+/* ─── CPU grayscale upload / download ──────────────────────────── */
+
+uint8_t* gpu_backend_upload_gray(GpuBackend *b,
+                                  const uint8_t *gray, int stride,
+                                  int width, int height) {
+    if (!b || !gray) return NULL;
+    size_t needed = (size_t)width * (size_t)height;
+    if (needed > b->gray_size) {
+        cudaFree(b->d_gray);
+        if (cudaMalloc((void **)&b->d_gray, needed) != cudaSuccess) return NULL;
+        b->gray_size = needed;
+    }
+    cudaError_t e = cudaMemcpy2DAsync(b->d_gray, (size_t)width,
+                      gray, (size_t)stride,
+                      (size_t)width, (size_t)height,
+                      cudaMemcpyHostToDevice, b->stream_decode);
+    if (e != cudaSuccess) return NULL;
+    return b->d_gray;
+}
+
+/* Download a GPU grayscale frame to CPU memory.
+ * Wraps cudaMemcpy2DAsync so it's compiled by nvcc (decoder.c uses MSVC). */
+bool gpu_backend_download_gray(GpuBackend *b,
+                                const uint8_t *d_gray, int gray_stride,
+                                int width, int height,
+                                uint8_t *h_dst, int dst_stride) {
+    if (!b || !d_gray || !h_dst) return false;
+    cudaError_t e = cudaMemcpy2DAsync(h_dst, (size_t)dst_stride,
+                      d_gray, (size_t)gray_stride,
+                      (size_t)width, (size_t)height,
+                      cudaMemcpyDeviceToHost, b->stream_decode);
+    return e == cudaSuccess;
+}
+
 /* ─── Calibration read (GPU accelerated) ──────────────────────────── */
 
 bool gpu_backend_read_calibration(GpuBackend *b,
@@ -575,6 +624,10 @@ void gpu_backend_sync_encode(GpuBackend *b) {
 
 void gpu_backend_sync_decode(GpuBackend *b) {
     cudaStreamSynchronize(b->stream_decode);
+}
+
+void* gpu_backend_get_decode_stream(GpuBackend *b) {
+    return b ? (void*)b->stream_decode : NULL;
 }
 
 #else /* !USE_CUDA — stubs */
@@ -681,6 +734,23 @@ bool gpu_backend_read_calibration(GpuBackend *b,
     return false;
 }
 
+uint8_t* gpu_backend_upload_gray(GpuBackend *b, const uint8_t *gray,
+                                    int stride, int width, int height) {
+    (void)b; (void)gray; (void)stride; (void)width; (void)height;
+    return NULL;
+}
+
+bool gpu_backend_download_gray(GpuBackend *b,
+                                const uint8_t *d_gray, int gray_stride,
+                                int width, int height,
+                                uint8_t *h_dst, int dst_stride) {
+    (void)b; (void)d_gray; (void)gray_stride;
+    (void)width; (void)height; (void)h_dst; (void)dst_stride;
+    return false;
+}
+
 void gpu_backend_sync(GpuBackend *b) { (void)b; }
+
+void* gpu_backend_get_decode_stream(GpuBackend *b) { (void)b; return NULL; }
 
 #endif /* USE_CUDA */

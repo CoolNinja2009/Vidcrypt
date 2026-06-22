@@ -66,23 +66,18 @@ void ffmpeg_hwdecoder_close(FfmpegHwDecoder *dec);
 
 /* ─── Frame decoding ──────────────────────────────────────────────── */
 
-/* Decode and retrieve the next frame in CUDA memory.
- * 'y_plane_out': receives CUdeviceptr to the NV12 Y-plane in GPU memory.
- *                Cast to (CUdeviceptr) for use with CUDA kernels.
+/* Decode and retrieve the next frame as a linear NV12 Y-plane.
+ * 'y_plane_out': receives pointer to the NV12 Y-plane (grayscale) in
+ *                system memory. Data is linear (not tiled) — handles
+ *                av_hwframe_transfer_data() internally.
  * 'pitch_out': receives the pitch (bytes per row) of the Y-plane.
- * 'width_out', 'height_out': receive frame display dimensions.
+ *              May be > width if aligned (handle when copying).
+ * 'width_out', 'height_out': receive frame dimensions.
  * Returns true if a frame was decoded, false on end of stream or error.
  *
- * The returned CUdeviceptr is valid until the next call to
- * ffmpeg_hwdecoder_read_frame() or ffmpeg_hwdecoder_close().
- *
- * The frame is NV12 format in CUDA memory. The Y-plane is
- * 'pitch_out' * 'height' bytes. The UV-plane follows at
- * y_plane + pitch_out * height.
- *
- * IMPORTANT: Before calling CUDA kernels on the returned memory,
- * ensure the CUDA context from the hwdevice_ctx is current on
- * the calling thread. Use cuCtxSetCurrent() if needed. */
+ * The returned pointer is valid until the next call to
+ * ffmpeg_hwdecoder_read_frame(). The Y-plane IS grayscale (NV12 luma).
+ * No CUDA context management needed — data is CPU-accessible. */
 bool ffmpeg_hwdecoder_read_frame(FfmpegHwDecoder *dec,
                                   uint8_t **y_plane_out,
                                   int *pitch_out,

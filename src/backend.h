@@ -8,7 +8,9 @@ extern "C" {
 #endif
 
 typedef enum {
-    BACKEND_CPU = 1
+    BACKEND_CPU  = 1,
+    BACKEND_GPU  = 2,
+    BACKEND_AUTO = 3
 } BackendMode;
 
 BackendMode backend_mode_from_string(const char *name);

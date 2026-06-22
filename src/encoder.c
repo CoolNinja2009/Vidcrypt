@@ -164,9 +164,17 @@ bool encoder_encode_file(const char *input_path, const EncoderConfig *config,
     int n_workers = config->num_workers;
     if (n_workers <= 0) n_workers = 4;
 
-    FrameGenContext *gen_ctx = (FrameGenContext *)calloc((size_t)n_workers, sizeof(FrameGenContext));
+    int batch_size = n_workers * 4;
+    if (batch_size < 8) batch_size = 8;
+    if (batch_size > 64) batch_size = 64;
+
+    /* Allocate one gen_ctx per batch slot so worker_id is unique per job.
+     * CRITICAL: if batch_size > n_workers and gen_ctx is sized to n_workers,
+     * two threads can share the same pf->work buffer = data corruption. */
+    int gen_ctx_count = batch_size;
+    FrameGenContext *gen_ctx = (FrameGenContext *)calloc((size_t)gen_ctx_count, sizeof(FrameGenContext));
     if (!gen_ctx) { fclose(in); snprintf(error_msg, (size_t)error_msg_size, "Out of memory"); return false; }
-    for (int i = 0; i < n_workers; ++i)
+    for (int i = 0; i < gen_ctx_count; ++i)
         if (!precomputed_frame_init(&gen_ctx[i].pf, &params)) {
             for (int j = 0; j < i; ++j) precomputed_frame_destroy(&gen_ctx[j].pf);
             free(gen_ctx); fclose(in);
@@ -184,7 +192,7 @@ bool encoder_encode_file(const char *input_path, const EncoderConfig *config,
         (int)params.frame_width, (int)params.frame_height,
         config->fps, config->codec_name);
     if (!vw) {
-        for (int i = 0; i < n_workers; ++i) precomputed_frame_destroy(&gen_ctx[i].pf);
+        for (int i = 0; i < gen_ctx_count; ++i) precomputed_frame_destroy(&gen_ctx[i].pf);
         free(gen_ctx); fclose(in);
         snprintf(error_msg, (size_t)error_msg_size, "Failed to create video writer: %s", ffmpeg_last_error());
         return false;
@@ -197,7 +205,7 @@ bool encoder_encode_file(const char *input_path, const EncoderConfig *config,
     prof_stage_end(&prof_ctx, PROF_ENCODE_HEADER_BUILD);
     if (!header_raw) {
         video_writer_close(vw);
-        for (int i = 0; i < n_workers; ++i) precomputed_frame_destroy(&gen_ctx[i].pf);
+        for (int i = 0; i < gen_ctx_count; ++i) precomputed_frame_destroy(&gen_ctx[i].pf);
         free(gen_ctx); fclose(in);
         snprintf(error_msg, (size_t)error_msg_size, "Failed to build header"); return false;
     }
@@ -231,7 +239,7 @@ bool encoder_encode_file(const char *input_path, const EncoderConfig *config,
     prof_stage_end(&prof_ctx, PROF_ENCODE_VIDEO_WRITE);
     if (!hdr_write_ok) {
         video_writer_close(vw); free(header_bits); free(header_raw);
-        for (int i = 0; i < n_workers; ++i) precomputed_frame_destroy(&gen_ctx[i].pf);
+        for (int i = 0; i < gen_ctx_count; ++i) precomputed_frame_destroy(&gen_ctx[i].pf);
         free(gen_ctx); fclose(in);
         snprintf(error_msg, (size_t)error_msg_size, "Failed to write header frame"); return false;
     }
@@ -242,15 +250,12 @@ bool encoder_encode_file(const char *input_path, const EncoderConfig *config,
     /* Streaming encode pipeline */
     int64_t written = 0;
     int bit_buffer_len = 0;
-    int batch_size = n_workers * 4;
-    if (batch_size < 8) batch_size = 8;
-    if (batch_size > 64) batch_size = 64;
 
     int bit_buf_cap = batch_size * pay_bits;
     uint8_t *bit_buffer = (uint8_t *)malloc((size_t)bit_buf_cap);
     if (!bit_buffer) {
         video_writer_close(vw);
-        for (int i = 0; i < n_workers; ++i) precomputed_frame_destroy(&gen_ctx[i].pf);
+        for (int i = 0; i < gen_ctx_count; ++i) precomputed_frame_destroy(&gen_ctx[i].pf);
         free(gen_ctx); fclose(in);
         snprintf(error_msg, (size_t)error_msg_size, "Out of memory"); return false;
     }
@@ -262,7 +267,7 @@ bool encoder_encode_file(const char *input_path, const EncoderConfig *config,
     if (!jobs || !batch_bits || !batch_frames) {
         free(jobs); free(batch_bits); free(batch_frames);
         free(bit_buffer); video_writer_close(vw);
-        for (int i = 0; i < n_workers; ++i) precomputed_frame_destroy(&gen_ctx[i].pf);
+        for (int i = 0; i < gen_ctx_count; ++i) precomputed_frame_destroy(&gen_ctx[i].pf);
         free(gen_ctx); fclose(in);
         snprintf(error_msg, (size_t)error_msg_size, "Out of memory"); return false;
     }
@@ -275,7 +280,7 @@ bool encoder_encode_file(const char *input_path, const EncoderConfig *config,
     if (!pool) {
         free(jobs); free(batch_bits); free(batch_frames);
         free(bit_buffer); video_writer_close(vw);
-        for (int i = 0; i < n_workers; ++i) precomputed_frame_destroy(&gen_ctx[i].pf);
+        for (int i = 0; i < gen_ctx_count; ++i) precomputed_frame_destroy(&gen_ctx[i].pf);
         free(gen_ctx); fclose(in);
         snprintf(error_msg, (size_t)error_msg_size, "Failed to create thread pool"); return false;
     }
@@ -284,7 +289,7 @@ bool encoder_encode_file(const char *input_path, const EncoderConfig *config,
     if (!chunk_data) {
         threadpool_destroy(pool); free(jobs); free(batch_bits); free(batch_frames);
         free(bit_buffer); video_writer_close(vw);
-        for (int i = 0; i < n_workers; ++i) precomputed_frame_destroy(&gen_ctx[i].pf);
+        for (int i = 0; i < gen_ctx_count; ++i) precomputed_frame_destroy(&gen_ctx[i].pf);
         free(gen_ctx); fclose(in);
         snprintf(error_msg, (size_t)error_msg_size, "Out of memory"); return false;
     }
@@ -304,7 +309,7 @@ bool encoder_encode_file(const char *input_path, const EncoderConfig *config,
                 fclose(in); free(chunk_data);
                 threadpool_destroy(pool); free(jobs); free(batch_bits); free(batch_frames);
                 free(bit_buffer); video_writer_close(vw);
-                for (int i = 0; i < n_workers; ++i) precomputed_frame_destroy(&gen_ctx[i].pf);
+                for (int i = 0; i < gen_ctx_count; ++i) precomputed_frame_destroy(&gen_ctx[i].pf);
                 free(gen_ctx);
                 snprintf(error_msg, (size_t)error_msg_size, "Out of memory"); return false;
             }
@@ -329,7 +334,7 @@ bool encoder_encode_file(const char *input_path, const EncoderConfig *config,
                            bit_buffer + (size_t)i * (size_t)pay_bits, (size_t)pay_bits);
                     jobs[i].frame_bits = batch_bits + (size_t)i * (size_t)pay_bits;
                     jobs[i].frame_out  = batch_frames + (size_t)i * (size_t)frame_size;
-                    jobs[i].worker_id  = (result->total_frames + i) % n_workers;
+                    jobs[i].worker_id  = i;  /* unique per batch slot — no two threads share a gen_ctx */
                     jobs[i].seq        = result->total_frames + i;
                 }
 
@@ -380,7 +385,7 @@ bool encoder_encode_file(const char *input_path, const EncoderConfig *config,
                    bit_buffer + (size_t)i * (size_t)pay_bits, (size_t)pay_bits);
             jobs[i].frame_bits = batch_bits + (size_t)i * (size_t)pay_bits;
             jobs[i].frame_out  = batch_frames + (size_t)i * (size_t)frame_size;
-            jobs[i].worker_id  = (result->total_frames + i) % n_workers;
+            jobs[i].worker_id  = i;  /* unique per batch slot */
             jobs[i].seq        = result->total_frames + i;
         }
 
@@ -410,11 +415,10 @@ bool encoder_encode_file(const char *input_path, const EncoderConfig *config,
             config->progress_callback(written, total_bytes, config->progress_user_data);
     }
 
-    /* Flush remaining partial frame */
+    /* Flush remaining partial frame (main thread only, no race) */
     if (bit_buffer_len > 0 || result->total_frames == 0) {
         for (int i = bit_buffer_len; i < pay_bits; ++i) bit_buffer[i] = 0;
-        int worker_idx = result->total_frames % n_workers;
-        uint8_t *frame = precomputed_frame_generate(&gen_ctx[worker_idx].pf, bit_buffer);
+        uint8_t *frame = precomputed_frame_generate(&gen_ctx[0].pf, bit_buffer);
         if (video_writer_write_frame(vw, frame, frame_size)) result->total_frames++;
     }
 
@@ -425,7 +429,7 @@ bool encoder_encode_file(const char *input_path, const EncoderConfig *config,
     free(bit_buffer);
     video_writer_close(vw);
 
-    for (int i = 0; i < n_workers; ++i) precomputed_frame_destroy(&gen_ctx[i].pf);
+    for (int i = 0; i < gen_ctx_count; ++i) precomputed_frame_destroy(&gen_ctx[i].pf);
     free(gen_ctx);
 
     double end_time = (double)clock() / CLOCKS_PER_SEC;

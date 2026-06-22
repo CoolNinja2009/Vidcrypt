@@ -2,9 +2,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include "decoder.h"
+#include "backend.h"
+#include "logutil.h"
 
 static void print_usage(void) {
-    printf("vidcrypt-decoder v4 — Decode a video back to the original file (CPU, gray8)\n");
+    printf("vidcrypt-decoder v4 — Decode a video back to the original file\n");
     printf("\n");
     printf("Usage:\n");
     printf("  vidcrypt-decoder -i <video> [options]\n");
@@ -13,6 +15,7 @@ static void print_usage(void) {
     printf("  -i, --input <path>       Input video file (required)\n");
     printf("  -o, --output-dir <dir>   Output directory (default: current dir)\n");
     printf("  -j, --workers <n>        Number of worker threads (default: 4)\n");
+    printf("  -b, --backend <mode>     Backend: cpu, gpu (default: cpu)\n");
     printf("  -h, --help               Show this help\n");
 }
 
@@ -32,6 +35,9 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "-j") == 0 || strcmp(argv[i], "--workers") == 0) {
             if (++i >= argc) return 1;
             config.num_workers = atoi(argv[i]);
+        } else if (strcmp(argv[i], "-b") == 0 || strcmp(argv[i], "--backend") == 0) {
+            if (++i >= argc) { fprintf(stderr, "Missing argument for %s\n", argv[i-1]); return 1; }
+            config.backend_mode = backend_mode_from_string(argv[i]);
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage();
             return 0;
@@ -48,6 +54,16 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    log_init();
+
+    LOG_SEPARATOR("VIDCRYPT DECODE SESSION");
+    LOG_INFO("Input: %s", input_path);
+    LOG_INFO("Backend: %s", backend_mode_name(config.backend_mode));
+    LOG_INFO("Workers: %d", config.num_workers);
+    LOG_METRIC("config.backend", (double)config.backend_mode);
+    if (config.output_dir[0])
+        LOG_INFO("Output dir: %s", config.output_dir);
+
     DecoderResult result;
     char error_msg[512];
     error_msg[0] = '\0';
@@ -55,6 +71,8 @@ int main(int argc, char **argv) {
     printf("Decoding: %s\n", input_path);
     if (config.output_dir[0])
         printf("Output dir: %s\n", config.output_dir);
+
+    LOG_INFO("Starting decode pipeline...");
 
     if (!decoder_decode_file(input_path, &config, &result, error_msg, sizeof(error_msg))) {
         fprintf(stderr, "Error: %s\n", error_msg);
@@ -66,6 +84,9 @@ int main(int argc, char **argv) {
             printf("  RS failures: %d\n", result.rs_failures);
             printf("  Checksum: %s\n", result.checksum_match ? "MATCH" : "MISMATCH");
         }
+        LOG_ERROR("Decode failed: %s", error_msg);
+        LOG_METRIC("decode.failed", 1.0);
+        log_close();
         return 1;
     }
 
@@ -78,6 +99,19 @@ int main(int argc, char **argv) {
     printf("Throughput: %.1f fps\n", result.fps);
     printf("RS failures: %d\n", result.rs_failures);
     printf("Checksum: %s\n", result.checksum_match ? "MATCH" : "MISMATCH");
+
+    LOG_SEPARATOR("DECODE COMPLETE");
+    LOG_INFO("Output: %s", result.output_path);
+    LOG_INFO("Filename: %s", result.original_filename);
+    LOG_METRIC("frames.total",   (double)result.total_frames);
+    LOG_METRIC("bytes.written",  (double)result.total_bytes_written);
+    LOG_METRIC("elapsed.sec",    result.elapsed_sec);
+    LOG_METRIC("throughput.fps", result.fps);
+    LOG_METRIC("rs.failures",    (double)result.rs_failures);
+    LOG_INFO("Checksum: %s", result.checksum_match ? "MATCH" : "MISMATCH");
+    LOG_METRIC("checksum.match", result.checksum_match ? 1.0 : 0.0);
+
+    log_close();
 
     return result.checksum_match ? 0 : 1;
 }

@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include "calibration.h"
 #include "framedecode.h"
+#include "backend.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -12,6 +13,7 @@ extern "C" {
 
 typedef struct DecoderConfig {
     int  num_workers;
+    BackendMode backend_mode;  /* BACKEND_CPU (default) or BACKEND_GPU */
 
     void (*progress_callback)(int64_t written, int64_t total, void *user_data);
     void *progress_user_data;
