@@ -41,17 +41,16 @@ Measured on **Ryzen 7 7700X (8C/16T)** + **NVIDIA RTX 5070 (Blackwell)**, 100 MB
 
 | Codec | Encode | CPU Decode | GPU Decode | GPU Decoder | Output Size |
 |-------|--------|-----------|-----------|-------------|-------------|
-| **FFV1** (lossless) | 56s / 731 FPS | 54s / 757 FPS | **20s / 2032 FPS** | sw ffv1 + CUDA tiles | 839 MB |
+| **FFV1** (lossless) | 51s / 803 FPS | 53s / 771 FPS | **18s / 2297 FPS** | sw ffv1 + CUDA tiles | 839 MB |
 | **H.264** (CRF 10 ultrafast) | 80s / 513 FPS | 64s / 646 FPS | **36s / 1127 FPS** | **h264_cuvid (NVDEC)** | 2.4 GB |
 
-GPU decode achieves **2.7× speedup** (FFV1) to **3.2×** (H.264 NVDEC) over CPU by:
+GPU decode achieves **3.0× speedup** (FFV1) to **3.2×** (H.264 NVDEC) over CPU by:
 1. **Direct libavcodec C API** — eliminates ffmpeg CLI pipe overhead
-2. **Async double-buffering** — CPU frame decode overlaps with GPU upload + kernel + D2H copyback
+2. **Quad-buffered async pipeline** — 4 slots overlap CPU decode, GPU upload, kernel, D2H copyback
 3. **CUDA `extract_bits` kernel** — massively parallel tile thresholding (one thread per block)
 4. **NVDEC hardware decode** (H.264 only) — offloads video decode to dedicated GPU silicon
 
 **YouTube workflow:** Encode to H.264 yuv420p (required for NVDEC), upload, download the re-encoded MP4, GPU-decode with `-b gpu`. RS ECC corrects any compression artifacts.
-
 Actual performance depends on resolution, block size, codec settings, GPU model, and system hardware.
 
 ---
