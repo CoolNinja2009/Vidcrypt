@@ -19,6 +19,21 @@ size_t bits_to_bytes(const uint8_t *bits, size_t nbits, uint8_t *bytes, size_t m
 /* Convert bytes[] to bit array. MSB-first unpacking. */
 void bytes_to_bits(const uint8_t *bytes, size_t nbytes, uint8_t *bits, size_t max_bits);
 
+/* LUT-accelerated byte→bit unpacking. ~10x faster than the general loop.
+ * 'bits_out' receives nbytes*8 bytes — each 0 or 1, MSB first per byte.
+ * Bits pointer MUST be pre-allocated (nbytes * 8 bytes). */
+void bytes_to_bits_fast(const uint8_t *bytes, size_t nbytes, uint8_t *bits_out);
+
+/* LUT-accelerated byte→bit unpacking with 8-byte stride output.
+ * Each source byte produces 8 bits written to bits_out at offsets
+ * (i*8+0)...(i*8+7). This is the core hot-path for encoder bit packing. */
+void bytes_to_bits_strided(const uint8_t *bytes, size_t nbytes,
+                            uint8_t *bits_out, size_t stride);
+
+/* Get direct pointer to the LUT row for a byte value.
+ * Returns pointer to 8 uint8_t values (bits 7..0 of the byte). */
+static inline const uint8_t* byte_to_bits_lut_row(uint8_t byte_val);
+
 /* Pack bits into uint64_t words. Returns number of words written. */
 size_t bits_to_words(const uint8_t *bits, size_t nbits, uint64_t *words, size_t max_words);
 
@@ -72,6 +87,24 @@ void bit_copy_range(const uint64_t *src, size_t bit_offset, size_t nbits, uint64
 /* Copy with offset on both sides. */
 void bit_copy_offset(const uint64_t *src, size_t src_offset,
                      uint64_t *dst, size_t dst_offset, size_t nbits);
+
+/* ─── LUT: byte → 8 bits (MSB-first) ──────────────────────────────────
+ * Each entry maps one byte to its 8-bit expansion as separate uint8 values.
+ * Index: byte value (0-255). Output: 8 bytes, each 0 or 1.
+ * Usage: memcpy(dst, BYTE_TO_BITS_LUT[byte_val], 8);
+ * This replaces the per-bit division loop and is ~10x faster. */
+extern const uint8_t BYTE_TO_BITS_LUT[256][8];
+
+/* 64-bit LUT alias: cast the existing 8-byte-per-entry table to uint64_t*.
+ * Allows single-instruction expansion: dst64[i] = LUT64[b];
+ * Eliminates 12M memcpy() calls in the hot encode path.
+ * Safe on little-endian (x86) because LUT[b][0] is at the lowest address. */
+#define LUT64 ((const uint64_t *)(const void *)BYTE_TO_BITS_LUT)
+
+/* Inline lookup: returns pointer to 8 pre-computed bit bytes for 'byte_val' */
+static inline const uint8_t* byte_to_bits_lut_row(uint8_t byte_val) {
+    return BYTE_TO_BITS_LUT[byte_val];
+}
 
 #ifdef __cplusplus
 }

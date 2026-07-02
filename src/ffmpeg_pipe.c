@@ -353,19 +353,27 @@ VideoWriter *video_writer_create(const char *ffmpeg_path,
      * by RS(255,223,32) ECC which corrects up to 16 bytes per block.
      * Other codecs (ffv1) are inherently lossless. */
     char quality[64] = "";
-    if (strcmp(codec_name, "h264") == 0 || strcmp(codec_name, "libx264") == 0)
-        snprintf(quality, sizeof(quality), " -crf 10 -preset fast");
+    if (strcmp(codec_name, "h264") == 0 || strcmp(codec_name, "libx264") == 0 ||
+        strcmp(codec_name, "hevc") == 0 || strcmp(codec_name, "libx265") == 0)
+        snprintf(quality, sizeof(quality), " -crf 10 -preset ultrafast");
+    /* For H.264/H.265, output yuv420p so NVDEC hardware decoders can handle it.
+     * Grayscale (4:0:0) is not supported by NVDEC. The encoder pads
+     * chroma planes to 128 (mid-gray) automatically from gray8 input. */
+    const char *out_pix_fmt = "gray";
+    if (strcmp(codec_name, "h264") == 0 || strcmp(codec_name, "libx264") == 0 ||
+        strcmp(codec_name, "hevc") == 0 || strcmp(codec_name, "libx265") == 0)
+        out_pix_fmt = "yuv420p";
 
     char cmd[8192];
     int n;
     if (strchr(ffmpeg, ' ') || strchr(path, ' '))
         n = snprintf(cmd, sizeof(cmd),
-                     "\"%s\" -y -f rawvideo -pix_fmt gray -s %dx%d -r %.2f -i - -c %s%s -pix_fmt gray -an \"%s\"",
-                     ffmpeg, width, height, fps, codec_name, quality, path);
+                     "\"%s\" -y -f rawvideo -pix_fmt gray -s %dx%d -r %.2f -i - -c %s%s -pix_fmt %s -an \"%s\"",
+                     ffmpeg, width, height, fps, codec_name, quality, out_pix_fmt, path);
     else
         n = snprintf(cmd, sizeof(cmd),
-                     "%s -y -f rawvideo -pix_fmt gray -s %dx%d -r %.2f -i - -c %s%s -pix_fmt gray -an \"%s\"",
-                     ffmpeg, width, height, fps, codec_name, quality, path);
+                     "%s -y -f rawvideo -pix_fmt gray -s %dx%d -r %.2f -i - -c %s%s -pix_fmt %s -an \"%s\"",
+                     ffmpeg, width, height, fps, codec_name, quality, out_pix_fmt, path);
     if ((size_t)n >= sizeof(cmd)) { video_writer_close(vw); set_error("Command too long"); return NULL; }
 
     vw->pipe = popen(cmd, "wb");

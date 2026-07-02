@@ -458,8 +458,9 @@ void tile_expand_bits(const uint8_t *src_bits,
             int bit_idx = row * grid_cols + col;
             uint8_t val = src_bits[bit_idx] ? 255 : 0;
             int x = block_x + col * block_size;
+            /* Use memset for bulk fill — block_size is small (8 or 16) */
             for (int yy = y; yy < y + block_size; ++yy)
-                memset(frame + yy * stride + x, val, (size_t)block_size);
+                memset(frame + (size_t)yy * (size_t)stride + (size_t)x, val, (size_t)block_size);
         }
     }
 }

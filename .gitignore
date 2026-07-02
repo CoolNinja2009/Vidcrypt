@@ -145,6 +145,11 @@ Bak/
 defunct/
 
 # ==================================================
+# NVIDIA Video Codec SDK (third-party, not authored by project)
+# ==================================================
+nvidia_sdk/
+
+# ==================================================
 # Keep important project files
 # ==================================================
 !CMakeLists.txt

@@ -37,34 +37,51 @@ Instead of storing data in traditional containers, VIDCRYPT converts files into 
 
 ## Performance
 
-Measured on **NVIDIA RTX 5070 (Blackwell)** with 1080p H.264 video:
+Measured on **Ryzen 7 7700X (8C/16T)** + **NVIDIA RTX 5070 (Blackwell)**, 100 MB payload, 1920×1080, block size 8, RS(255,223,32):
 
-| Backend | Decode | Encode |
-| ------- | ------ | ------ |
-| **CPU** | ~836 FPS | ~900 FPS |
-| **GPU** | **~2378 FPS** | *TBD* |
+| Codec | Encode | CPU Decode | GPU Decode | GPU Decoder | Output Size |
+|-------|--------|-----------|-----------|-------------|-------------|
+| **FFV1** (lossless) | 56s / 731 FPS | 54s / 757 FPS | **20s / 2032 FPS** | sw ffv1 + CUDA tiles | 839 MB |
+| **H.264** (CRF 10 ultrafast) | 80s / 513 FPS | 64s / 646 FPS | **36s / 1127 FPS** | **h264_cuvid (NVDEC)** | 2.4 GB |
 
-GPU decode achieves **2.85× speedup** over CPU by:
-1. **Direct libavcodec C API** — eliminates ffmpeg CLI pipe (`popen`/`fread`) overhead
+GPU decode achieves **2.7× speedup** (FFV1) to **3.2×** (H.264 NVDEC) over CPU by:
+1. **Direct libavcodec C API** — eliminates ffmpeg CLI pipe overhead
 2. **Async double-buffering** — CPU frame decode overlaps with GPU upload + kernel + D2H copyback
 3. **CUDA `extract_bits` kernel** — massively parallel tile thresholding (one thread per block)
+4. **NVDEC hardware decode** (H.264 only) — offloads video decode to dedicated GPU silicon
+
+**YouTube workflow:** Encode to H.264 yuv420p (required for NVDEC), upload, download the re-encoded MP4, GPU-decode with `-b gpu`. RS ECC corrects any compression artifacts.
 
 Actual performance depends on resolution, block size, codec settings, GPU model, and system hardware.
 
 ---
 
+## Codec Guide
+
+| Codec | Lossless | Encode Speed | GPU Decode | Best For |
+|-------|----------|-------------|-----------|----------|
+| **ffv1** (default) | Yes | Fast | CUDA tiles only | Local archiving, max fidelity |
+| **ffvhuff** | Yes | Fast | CUDA tiles only | Same as ffv1 but 25× larger output |
+| **h264** | Near (CRF 10) | Medium | **NVDEC hardware** | YouTube upload, NVDEC decode |
+| **hevc** | Near (CRF 10) | Very slow | **NVDEC hardware** | Not recommended (encode too slow) |
+
+> **NVDEC requires yuv420p pixel format.** The encoder automatically uses yuv420p output for h264/hevc codecs so NVDEC can hardware-decode them.
+
+
 ## Requirements
 
 * CMake 3.16+
-* C17-compatible compiler
-* FFmpeg + FFprobe (for CPU path)
-* **For GPU acceleration:** NVIDIA GPU (Maxwell+) + CUDA Toolkit 12.x + NVIDIA Video Codec SDK (for NVENC)
+* C17-compatible compiler (GCC, Clang, MSVC)
+* FFmpeg + FFprobe (for CPU pipe path)
+* **For GPU acceleration:** NVIDIA GPU (Maxwell+) + CUDA Toolkit 12.x
+* **For NVDEC:** FFmpeg dev headers (BtbN shared build) in `ffmpeg_shared/`
+* **For NVENC:** NVIDIA Video Codec SDK (optional)
 
 ---
 
 ## Build
 
-### CPU-only (any system)
+### CPU-only (any compiler)
 
 ```bash
 mkdir build && cd build
@@ -72,11 +89,14 @@ cmake ..
 cmake --build . --config Release
 ```
 
-### GPU-accelerated (requires NVIDIA CUDA Toolkit)
+### GPU-accelerated (requires MSVC + CUDA Toolkit)
+
+> **Windows CUDA builds require the MSVC toolchain.** MinGW/GCC cannot link CUDA objects.
+> Use the Visual Studio generator or open the generated `.sln` in Visual Studio.
 
 ```bash
 mkdir build && cd build
-cmake .. -DUSE_CUDA=ON
+cmake .. -G "Visual Studio 17 2022" -A x64 -DUSE_CUDA=ON
 cmake --build . --config Release
 ```
 
@@ -87,7 +107,7 @@ cmake --build . --config Release
 | `USE_CUDA` | `OFF` | Enable CUDA GPU acceleration |
 | `ENABLE_AVX2` | `ON` | Enable AVX2 SIMD for calibration reader |
 | `ENABLE_PROFILING` | `OFF` | Enable per-stage profiling instrumentation |
-
+| `ENABLE_LOGGING` | `OFF` | Enable detailed session logging to `log/` |
 ---
 
 ## Usage
@@ -95,7 +115,11 @@ cmake --build . --config Release
 ### Encode a File
 
 ```bash
+# Lossless (fastest encode, best for archiving)
 vidcrypt-encoder -i input.zip -o encoded.mkv
+
+# YouTube-optimized (H.264, NVDEC-compatible)
+vidcrypt-encoder -i input.zip -o encoded.mkv -c h264
 ```
 
 ### Decode a Video (CPU)
@@ -145,8 +169,8 @@ The decoder automatically restores the original filename and verifies the recove
 │   ├── simd_decode.c/h   SIMD-accelerated tile thresholding
 │   ├── threadpool.c/h    Multi-threaded worker pool
 │   ├── profiling.c/h     Per-stage profiling instrumentation
+│   ├── logutil.c/h       Structured logging utility
 │   ├── sha256.c/h        SHA-256 integrity verification
-│   ├── bitstream.c/h     Bit packing/unpacking utilities
 │   └── crc16.c/h         CRC-16-CCITT checksum
 ├── tests/                Unit tests
 ├── docs/                 Documentation

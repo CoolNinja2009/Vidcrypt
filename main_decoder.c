@@ -14,7 +14,7 @@ static void print_usage(void) {
     printf("Options:\n");
     printf("  -i, --input <path>       Input video file (required)\n");
     printf("  -o, --output-dir <dir>   Output directory (default: current dir)\n");
-    printf("  -j, --workers <n>        Number of worker threads (default: 4)\n");
+    printf("  -j, --workers <n>        Number of worker threads (default: auto)\n");
     printf("  -b, --backend <mode>     Backend: cpu, gpu (default: cpu)\n");
     printf("  -h, --help               Show this help\n");
 }

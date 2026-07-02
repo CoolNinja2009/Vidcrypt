@@ -107,8 +107,11 @@ void write_calibration_dots(uint8_t *frame, int width, int height,
 
     int cell_w = cal_width  / CAL_COLS;
     int cell_h = cal_height / CAL_ROWS;
-    int dot_w  = (cell_w * 7) / 10; if (dot_w < 2) dot_w = 2;
-    int dot_h  = (cell_h * 7) / 10; if (dot_h < 2) dot_h = 2;
+    /* Use 90% of cell for dots — H.264 lossy compression erases small dots.
+     * At 1920×1080, cell size is ~36×10 px; 90% gives 32×9 px dots which
+     * survive DCT quantization even at moderate bitrates. */
+    int dot_w  = (cell_w * 9) / 10; if (dot_w < 2) dot_w = 2;
+    int dot_h  = (cell_h * 9) / 10; if (dot_h < 2) dot_h = 2;
 
     uint8_t cal_data[24];
     build_calibration_bytes(params, cal_data);

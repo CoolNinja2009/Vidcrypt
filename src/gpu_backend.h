@@ -14,6 +14,9 @@ extern "C" {
 struct GpuBackend;
 typedef struct GpuBackend GpuBackend;
 
+struct GpuNvencEncoder;
+typedef struct GpuNvencEncoder GpuNvencEncoder;
+
 /* ─── GPU Backend ───────────────────────────────────────────────────
  * Manages CUDA device, memory pool, streams, NVDEC/NVENC lifecycle. */
 
@@ -52,6 +55,46 @@ bool gpu_backend_open_nvenc(GpuBackend *backend, int width, int height,
 void gpu_backend_close_nvenc(GpuBackend *backend);
 int  gpu_backend_get_nvenc_packet(GpuBackend *backend, const uint8_t **packet_out);
 int  gpu_backend_flush_nvenc(GpuBackend *backend);
+
+/* Retrieve SPS+PPS extradata extracted from first encoded frame.
+ * Returns size in bytes (AVCC format), or 0 if not yet available.
+ * Falls back to manual SPS/PPS construction if NAL extraction fails. */
+int  gpu_backend_get_nvenc_sps_pps(GpuBackend *backend, const uint8_t **data_out);
+
+/* Get the raw NVENC encoder handle for direct zero-copy API access.
+ * Returns NULL if NVENC is not open. Caller must not destroy it. */
+struct GpuNvencEncoder* gpu_backend_get_nvenc_encoder(GpuBackend *backend);
+
+/* Zero-copy encode: BGR24 GPU frame → BGRA32 kernel → NVENC ARGB → H.264.
+ * Uses nvEncRegisterResource for true zero-copy (NVENC reads directly from
+ * GPU device memory — no PCIe D2H copy for frame data).
+ * 'packet_out' and 'packet_size_out' receive the encoded H.264 packet.
+ * Returns 0 on success, -1 on error. */
+int gpu_backend_write_frame_zerocopy(GpuBackend *backend,
+                                      const uint8_t *d_frame_bgr24,
+                                      int stride,
+                                      const uint8_t **packet_out,
+                                      int *packet_size_out);
+
+/* Write a grayscale frame (Y plane) to NVENC using NV12 format.
+ * On first call: synchronous encode + SPS/PPS extraction.
+ * Subsequent calls: synchronous path (use _submit variant for async).
+ * d_y: device pointer to Y plane (grayscale, width*height bytes).
+ * stride: bytes per row (= width for tightly packed grayscale).
+ * Returns 0 on success, -1 on error. */
+bool gpu_backend_write_frame_nv12(GpuBackend *backend,
+                                   const uint8_t *d_y, int stride);
+
+/* Submit a grayscale frame to NVENC asynchronously (no drain).
+ * First frame must have been submitted via gpu_backend_write_frame_nv12().
+ * Returns true on success, false on error. */
+bool gpu_backend_write_frame_submit(GpuBackend *backend,
+                                     const uint8_t *d_y, int stride);
+
+/* Drain completed async NVENC frames into the packet ring buffer.
+ * Returns number of new bytes drained, or -1 on error.
+ * Call gpu_backend_get_nvenc_packet() to retrieve drained data. */
+int  gpu_backend_drain_nvenc(GpuBackend *backend);
 
 uint32_t* gpu_backend_calibration_buffer(GpuBackend *backend);
 
@@ -112,14 +155,50 @@ uint8_t* gpu_backend_extract_calibration(GpuBackend *backend,
 
 /* ─── Encode pipeline helpers ─────────────────────────────────────── */
 
-/* Generate a BGR frame from payload bits, in GPU memory.
- * Returns device pointer to BGR frame. */
+#include "calibration.h"
+
+/* Generate a grayscale frame from payload bits, in GPU memory.
+ * 'params' provides calibration parameters for template render.
+ * Returns device pointer to grayscale frame. */
 uint8_t* gpu_backend_generate_frame(GpuBackend *backend,
                                      const uint8_t *bits, int nbits,
                                      int width, int height,
                                      int grid_cols, int payload_rows,
                                      int block_size,
-                                     int margin_x, int margin_y);
+                                     int margin_x, int margin_y,
+                                     const CalParams *params);
+
+/* Generate frame from device-resident bits (no H2D copy). */
+uint8_t* gpu_backend_generate_frame_dbits(GpuBackend *backend,
+                                           const uint8_t *d_bits, int nbits,
+                                           int width, int height,
+                                           int grid_cols, int payload_rows,
+                                           int block_size,
+                                           int margin_x, int margin_y,
+                                           const CalParams *params);
+
+/* BGR24 variant for NVENC ARGB pipeline (3 bytes/px output). */
+uint8_t* gpu_backend_generate_frame_dbits_bgr24(GpuBackend *backend,
+                                                 const uint8_t *d_bits, int nbits,
+                                                 int width, int height,
+                                                 int grid_cols, int payload_rows,
+                                                 int block_size,
+                                                 int margin_x, int margin_y,
+                                                 const CalParams *params);
+
+/* Upload RS parity dictionary to GPU. */
+bool gpu_backend_upload_rs_dict(GpuBackend *backend,
+                                 const uint8_t *dict, size_t dict_size,
+                                 int k, int n_k,
+                                 char *error_out, int error_size);
+
+/* Run GPU RS encode + bit expansion. */
+bool gpu_backend_rs_encode(GpuBackend *backend,
+                            const uint8_t *d_raw, int64_t raw_bytes,
+                            int k, int n_k, int n,
+                            uint8_t **d_enc_out, int *enc_bytes_out,
+                            uint64_t **d_bits_out, int *bits_bytes_out,
+                            char *error_out, int error_size);
 
 /* Write a GPU frame to video via NVENC (or fallback FFmpeg pipe).
  * Returns true on success. */

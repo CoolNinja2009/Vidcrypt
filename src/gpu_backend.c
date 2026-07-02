@@ -53,6 +53,21 @@ struct GpuBackend {
     int             encode_width;
     int             encode_height;
     double          encode_fps;
+    uint8_t        *d_uv_fill;        /* GPU: NV12 UV plane filled with 128 */
+
+    /* Template rendering state — separate from NVENC dimensions */
+    int             template_width;
+    int             template_height;
+    bool            template_rendered;
+
+    /* RS encode acceleration */
+    uint8_t        *d_rs_dict;        /* GPU: uploaded parity dictionary */
+    size_t          rs_dict_size;
+    int             rs_k, rs_n_k;
+    uint8_t        *d_enc_buf;        /* GPU: RS-encoded output */
+    size_t          enc_buf_size;
+    uint64_t       *d_bit_buf;        /* GPU: bit-expanded output */
+    size_t          bit_buf_size;
 };
 
 /* ─── Memory pool allocation ─────────────────────────────────────── */
@@ -170,6 +185,7 @@ void gpu_backend_destroy(GpuBackend *b) {
     cudaFree(b->d_output_frame);
     cudaFree(b->d_template);
     cudaFree(b->d_cal_data);
+    cudaFree(b->d_uv_fill);
 
     memset(b, 0, sizeof(GpuBackend));
     free(b);
@@ -223,13 +239,35 @@ bool gpu_backend_open_nvenc(GpuBackend *b, int width, int height,
     b->encode_width = width;
     b->encode_height = height;
     b->encode_fps = fps;
+
+    /* Allocate UV fill plane (all 128 = neutral chroma for NV12) */
+    size_t uv_size = (size_t)width * (size_t)height / 2;
+    if (cudaMalloc((void **)&b->d_uv_fill, uv_size) != cudaSuccess) {
+        gpu_backend_close_nvenc(b);
+        if (error_out) snprintf(error_out, (size_t)error_size,
+                                "cudaMalloc UV fill failed");
+        return false;
+    }
+    if (cudaMemset(b->d_uv_fill, 128, uv_size) != cudaSuccess) {
+        gpu_backend_close_nvenc(b);
+        if (error_out) snprintf(error_out, (size_t)error_size,
+                                "cudaMemset UV fill failed");
+        return false;
+    }
+
     return true;
 }
 
 void gpu_backend_close_nvenc(GpuBackend *b) {
-    if (!b || !b->nvenc) return;
-    gpu_nvenc_destroy(b->nvenc);
-    b->nvenc = NULL;
+    if (!b) return;
+    if (b->nvenc) {
+        gpu_nvenc_destroy(b->nvenc);
+        b->nvenc = NULL;
+    }
+    if (b->d_uv_fill) {
+        cudaFree(b->d_uv_fill);
+        b->d_uv_fill = NULL;
+    }
 }
 
 int gpu_backend_get_nvenc_packet(GpuBackend *b, const uint8_t **packet_out) {
@@ -247,6 +285,62 @@ int gpu_backend_flush_nvenc(GpuBackend *b) {
 
 uint32_t* gpu_backend_calibration_buffer(GpuBackend *b) {
     return b ? b->d_cal_data : NULL;
+}
+
+int gpu_backend_get_nvenc_sps_pps(GpuBackend *b, const uint8_t **data_out) {
+    if (!b || !b->nvenc) {
+        if (data_out) *data_out = NULL;
+        return 0;
+    }
+    return gpu_nvenc_get_sps_pps(b->nvenc, data_out);
+}
+
+GpuNvencEncoder* gpu_backend_get_nvenc_encoder(GpuBackend *b) {
+    return b ? b->nvenc : NULL;
+}
+
+int gpu_backend_write_frame_zerocopy(GpuBackend *b,
+                                      const uint8_t *d_frame_bgr24,
+                                      int stride,
+                                      const uint8_t **packet_out,
+                                      int *packet_size_out) {
+    if (!b || !b->nvenc || !d_frame_bgr24) {
+        if (packet_out) *packet_out = NULL;
+        if (packet_size_out) *packet_size_out = 0;
+        return -1;
+    }
+    return gpu_nvenc_encode_frame_zerocopy(b->nvenc, d_frame_bgr24, stride,
+                                            packet_out, packet_size_out);
+}
+
+bool gpu_backend_write_frame_nv12(GpuBackend *b,
+                                   const uint8_t *d_y, int stride) {
+    fprintf(stderr, "  [TRACE] write_frame_nv12: b=%p nvenc=%p d_y=%p uv=%p\n",
+            (void*)b, (void*)(b ? b->nvenc : NULL), (void*)d_y,
+            (void*)(b ? b->d_uv_fill : NULL));
+    if (!b || !b->nvenc || !d_y || !b->d_uv_fill) {
+        fprintf(stderr, "  write_frame_nv12: NULL CHECK FAILED\n");
+        return false;
+    }
+    (void)stride;
+    int result = gpu_nvenc_encode_frame_nv12(b->nvenc, d_y, b->d_uv_fill,
+                                              (void *)b->stream_encode);
+    fprintf(stderr, "  [TRACE] write_frame_nv12: result=%d\n", result);
+    return result >= 0;
+}
+
+bool gpu_backend_write_frame_submit(GpuBackend *b,
+                                     const uint8_t *d_y, int stride) {
+    if (!b || !b->nvenc || !d_y || !b->d_uv_fill) return false;
+    (void)stride;
+    int result = gpu_nvenc_encode_frame_nv12_submit(b->nvenc, d_y, b->d_uv_fill,
+                                                     (void *)b->stream_encode);
+    return result == 0;
+}
+
+int gpu_backend_drain_nvenc(GpuBackend *b) {
+    if (!b || !b->nvenc) return -1;
+    return gpu_nvenc_drain_output(b->nvenc);
 }
 
 /* ─── Decode: FFmpeg HW → nv12_to_gray → extract_bits → CPU ──────── */
@@ -444,23 +538,18 @@ static bool ensure_template_rendered(GpuBackend *b, int w, int h,
                                       int grid_cols, int block_size,
                                       int margin_x, int margin_y,
                                       int payload_rows) {
-    if (b->d_template && b->encode_width == w && b->encode_height == h) {
+    /* Use dedicated template_rendered flag — NOT encode_width/height
+     * which are set by gpu_backend_open_nvenc for NVENC. */
+    if (b->template_rendered && b->template_width == w && b->template_height == h) {
         return true; /* already rendered at this resolution */
     }
     /* Resize template buffer if needed */
-    size_t needed = (size_t)w * (size_t)h * 3;
+    size_t bgr_size = (size_t)w * (size_t)h * 3;
     cudaFree(b->d_template);
     b->d_template = NULL;
-    if (cudaMalloc((void **)&b->d_template, needed) != cudaSuccess) return false;
+    if (cudaMalloc((void **)&b->d_template, bgr_size) != cudaSuccess) return false;
 
-    /* Allocate/upload calibration data */
-    if (!b->d_cal_data) {
-        if (cudaMalloc((void **)&b->d_cal_data, 24) != cudaSuccess) {
-            cudaFree(b->d_template);
-            b->d_template = NULL;
-            return false;
-        }
-    }
+    /* Build calibration params */
     CalParams params;
     memset(&params, 0, sizeof(params));
     params.frame_width      = (uint16_t)w;
@@ -476,21 +565,64 @@ static bool ensure_template_rendered(GpuBackend *b, int w, int h,
     params.header_version   = 3;
     params.calibration_rows = CAL_ROWS;
     params.sync_rows        = 1;
+    /* Render template on CPU (proven calibration rendering),
+     * then upload to GPU. This avoids the GPU render_template kernel
+     * which can have subtle pixel-value issues under H.264. */
+    size_t gray_size = (size_t)w * (size_t)h;
+    uint8_t *h_template_gray = (uint8_t *)calloc(1, gray_size);
+    uint8_t *h_template_bgr  = (uint8_t *)calloc(1, bgr_size);
+    if (!h_template_gray || !h_template_bgr) {
+        free(h_template_gray); free(h_template_bgr);
+        cudaFree(b->d_template); b->d_template = NULL;
+        return false;
+    }
 
-    uint8_t cal_bytes[24];
-    build_calibration_bytes(&params, cal_bytes);
-    cudaMemcpy(b->d_cal_data, cal_bytes, 24, cudaMemcpyHostToDevice);
+    /* Render calibration dots on CPU */
+    write_calibration_dots(h_template_gray, w, h, &params);
 
-    /* Launch template render kernel (grid ignored, recomputed from dims) */
-    dim3 grid1 = {1, 1, 1};
-    dim3 block32_16 = {32, 16, 1};
-    render_template_kernel(grid1, block32_16, b->d_template, w * 3,
-                            w, h, grid_cols, block_size,
-                            margin_x, margin_y,
-                            b->d_cal_data,
-                            b->stream_encode);
-    b->encode_width = w;
-    b->encode_height = h;
+    /* Render sync row (alternating black/white tiles) */
+    int cal_bottom = (int)(h * (CAL_TOP_FRAC + CAL_HEIGHT_FRAC));
+    int sync_y = cal_bottom + margin_y;
+    for (int col = 0; col < grid_cols; ++col) {
+        uint8_t val = (col % 2) ? 255 : 0;
+        int x0 = margin_x + col * block_size;
+        int y0 = sync_y;
+        int x_end = x0 + block_size;
+        int y_end = y0 + block_size;
+        if (x_end > w) x_end = w;
+        if (y_end > h) y_end = h;
+        for (int yy = y0; yy < y_end; ++yy)
+            memset(h_template_gray + yy * w + x0, val, (size_t)(x_end - x0));
+    }
+
+    /* Place corner markers (8x8 checkerboard) for decoder self-alignment */
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            uint8_t cv = ((x + y) & 1) ? 255 : 0;
+            h_template_gray[y * w + x] = cv;                          /* top-left */
+            h_template_gray[y * w + (w - 8 + x)] = cv;               /* top-right */
+            h_template_gray[(h - 8 + y) * w + x] = cv;               /* bottom-left */
+            h_template_gray[(h - 8 + y) * w + (w - 8 + x)] = cv;    /* bottom-right */
+        }
+    }
+
+    /* Convert grayscale to BGR24 (all 3 channels = gray value) */
+    for (size_t i = 0; i < gray_size; ++i) {
+        uint8_t v = h_template_gray[i];
+        h_template_bgr[i * 3 + 0] = v;  /* B */
+        h_template_bgr[i * 3 + 1] = v;  /* G */
+        h_template_bgr[i * 3 + 2] = v;  /* R */
+    }
+
+    /* Upload BGR24 template to GPU */
+    cudaMemcpy(b->d_template, h_template_bgr, bgr_size, cudaMemcpyHostToDevice);
+
+    free(h_template_gray);
+    free(h_template_bgr);
+
+    b->template_width = w;
+    b->template_height = h;
+    b->template_rendered = true;
     return true;
 }
 
@@ -499,7 +631,9 @@ uint8_t* gpu_backend_generate_frame(GpuBackend *b,
                                      int width, int height,
                                      int grid_cols, int payload_rows,
                                      int block_size,
-                                     int margin_x, int margin_y) {
+                                     int margin_x, int margin_y,
+                                     const CalParams *params) {
+    (void)params;
     /* Resize output frame buffer if needed */
     size_t frame_needed = (size_t)width * (size_t)height * 3;
     if (frame_needed > b->frame_size) {
@@ -630,6 +764,136 @@ void* gpu_backend_get_decode_stream(GpuBackend *b) {
     return b ? (void*)b->stream_decode : NULL;
 }
 
+/* ─── GPU RS encode + device-bits frame gen ─────────────────────────── */
+
+bool gpu_backend_upload_rs_dict(GpuBackend *b,
+                                 const uint8_t *dict, size_t dict_size,
+                                 int k, int n_k,
+                                 char *error_out, int error_size) {
+    if (!b || !dict || dict_size == 0) {
+        if (error_out) snprintf(error_out, (size_t)error_size, "Invalid dict args");
+        return false;
+    }
+    if (b->d_rs_dict && b->rs_dict_size != dict_size) {
+        cudaFree(b->d_rs_dict); b->d_rs_dict = NULL; b->rs_dict_size = 0;
+    }
+    if (!b->d_rs_dict) {
+        if (cudaMalloc((void **)&b->d_rs_dict, dict_size) != cudaSuccess) {
+            if (error_out) snprintf(error_out, (size_t)error_size, "cudaMalloc dict failed");
+            return false;
+        }
+    }
+    if (cudaMemcpy(b->d_rs_dict, dict, dict_size, cudaMemcpyHostToDevice) != cudaSuccess) {
+        if (error_out) snprintf(error_out, (size_t)error_size, "cudaMemcpy dict failed");
+        return false;
+    }
+    b->rs_dict_size = dict_size; b->rs_k = k; b->rs_n_k = n_k;
+    return true;
+}
+
+bool gpu_backend_rs_encode(GpuBackend *b,
+                            const uint8_t *d_raw, int64_t raw_bytes,
+                            int k, int n_k, int n,
+                            uint8_t **d_enc_out, int *enc_bytes_out,
+                            uint64_t **d_bits_out, int *bits_bytes_out,
+                            char *error_out, int error_size) {
+    if (!b || !d_raw || raw_bytes <= 0) return false;
+    if (!b->d_rs_dict || b->rs_k != k || b->rs_n_k != n_k) {
+        if (error_out) snprintf(error_out, (size_t)error_size, "RS dict not uploaded");
+        return false;
+    }
+    int N = (int)((raw_bytes + k - 1) / k);
+    int64_t enc_bytes = (int64_t)N * (int64_t)n;
+    int64_t bits_bytes = enc_bytes * 8;
+    if (enc_bytes > INT_MAX || bits_bytes > INT_MAX) return false;
+
+    size_t enc_needed = (size_t)enc_bytes;
+    if (!b->d_enc_buf || b->enc_buf_size < enc_needed) {
+        if (b->d_enc_buf) cudaFree(b->d_enc_buf);
+        if (cudaMalloc((void **)&b->d_enc_buf, enc_needed) != cudaSuccess) return false;
+        b->enc_buf_size = enc_needed;
+    }
+    size_t bits_needed = (size_t)bits_bytes;
+    if (!b->d_bit_buf || b->bit_buf_size < bits_needed) {
+        if (b->d_bit_buf) cudaFree(b->d_bit_buf);
+        if (cudaMalloc((void **)&b->d_bit_buf, bits_needed) != cudaSuccess) return false;
+        b->bit_buf_size = bits_needed;
+    }
+    rs_encode_dict_kernel(d_raw, b->d_rs_dict, b->d_enc_buf, k, n_k, N, b->stream_encode);
+    bit_expand_kernel(b->d_enc_buf, b->d_bit_buf, (int)enc_bytes, b->stream_encode);
+    if (cudaStreamSynchronize(b->stream_encode) != cudaSuccess) return false;
+
+    if (d_enc_out) *d_enc_out = b->d_enc_buf;
+    if (enc_bytes_out) *enc_bytes_out = (int)enc_bytes;
+    if (d_bits_out) *d_bits_out = b->d_bit_buf;
+    if (bits_bytes_out) *bits_bytes_out = (int)bits_bytes;
+    return true;
+}
+
+uint8_t* gpu_backend_generate_frame_dbits(GpuBackend *b,
+                                           const uint8_t *d_bits, int nbits,
+                                           int width, int height,
+                                           int grid_cols, int payload_rows,
+                                           int block_size,
+                                           int margin_x, int margin_y,
+                                           const CalParams *params) {
+    size_t frame_needed = (size_t)width * (size_t)height;
+    if (frame_needed > b->frame_size) {
+        cudaFree(b->d_output_frame);
+        if (cudaMalloc((void **)&b->d_output_frame, frame_needed) != cudaSuccess) return NULL;
+        b->frame_size = frame_needed;
+    }
+    if (!ensure_template_rendered(b, width, height, grid_cols, block_size, margin_x, margin_y, payload_rows))
+        return NULL;
+    cudaMemcpyAsync(b->d_output_frame, b->d_template, frame_needed, cudaMemcpyDeviceToDevice, b->stream_encode);
+    int cal_bottom = (int)(height * 0.06f);
+    int pay_y = cal_bottom + margin_y + block_size;
+    int pay_x = margin_x;
+    dim3 block_px = {(unsigned int)block_size, (unsigned int)block_size, 1};
+    dim3 grid_px = {(unsigned int)grid_cols, (unsigned int)payload_rows, 1};
+    frame_generate_gray_kernel(grid_px, block_px, b->d_output_frame, width,
+                                d_bits, pay_y, pay_x, block_size, grid_cols, payload_rows,
+                                b->stream_encode);
+    return b->d_output_frame;
+}
+
+/* BGR24 variant for NVENC ARGB pipeline (device-resident bits, no H2D copy). */
+uint8_t* gpu_backend_generate_frame_dbits_bgr24(GpuBackend *b,
+                                                 const uint8_t *d_bits, int nbits,
+                                                 int width, int height,
+                                                 int grid_cols, int payload_rows,
+                                                 int block_size,
+                                                 int margin_x, int margin_y,
+                                                 const CalParams *params) {
+    (void)params;
+    size_t frame_needed = (size_t)width * (size_t)height * 3;
+    if (frame_needed > b->frame_size) {
+        cudaFree(b->d_output_frame);
+        if (cudaMalloc((void **)&b->d_output_frame, frame_needed) != cudaSuccess)
+            return NULL;
+        b->frame_size = frame_needed;
+    }
+    if (!ensure_template_rendered(b, width, height, grid_cols, block_size,
+                                   margin_x, margin_y, payload_rows))
+        return NULL;
+    /* Copy full BGR24 template */
+    cudaMemcpyAsync(b->d_output_frame, b->d_template, frame_needed,
+                    cudaMemcpyDeviceToDevice, b->stream_encode);
+    int cal_bottom = (int)(height * 0.06f);
+    int pay_y = cal_bottom + margin_y + block_size;
+    int pay_x = margin_x;
+    dim3 block_px = {(unsigned int)block_size, (unsigned int)block_size, 1};
+    dim3 grid_px = {(unsigned int)grid_cols, (unsigned int)payload_rows, 1};
+    /* Use BGR24 payload kernel (not grayscale) for NVENC ARGB pipeline.
+     * CRITICAL: use the d_bits parameter (device-resident bit data passed
+     * by caller), NOT b->d_bits (internal buffer that may have stale data). */
+    frame_generate_kernel(grid_px, block_px, b->d_output_frame, width * 3,
+                           d_bits, pay_y, pay_x, block_size, grid_cols, payload_rows,
+                           b->stream_encode);
+    (void)nbits;
+    return b->d_output_frame;
+}
+
 #else /* !USE_CUDA — stubs */
 
 GpuStatus gpu_backend_init(GpuBackend **backend, int device_id,
@@ -665,6 +929,22 @@ int gpu_backend_get_nvenc_packet(GpuBackend *b, const uint8_t **packet_out) {
     (void)b; if (packet_out) *packet_out = NULL; return 0;
 }
 int gpu_backend_flush_nvenc(GpuBackend *b) { (void)b; return -1; }
+int gpu_backend_get_nvenc_sps_pps(GpuBackend *b, const uint8_t **data_out) {
+    (void)b; if (data_out) *data_out = NULL; return 0;
+}
+GpuNvencEncoder* gpu_backend_get_nvenc_encoder(GpuBackend *b) { (void)b; return NULL; }
+int gpu_backend_write_frame_zerocopy(GpuBackend *b, const uint8_t *d, int s,
+                                      const uint8_t **p, int *ps) {
+    (void)b; (void)d; (void)s; if (p) *p = NULL; if (ps) *ps = 0; return -1;
+}
+bool gpu_backend_write_frame_nv12(GpuBackend *b, const uint8_t *d_y, int stride) {
+    fprintf(stderr, "  [STUB] write_frame_nv12 called!\n");
+    (void)b; (void)d_y; (void)stride; return false;
+}
+bool gpu_backend_write_frame_submit(GpuBackend *b, const uint8_t *d_y, int stride) {
+    (void)b; (void)d_y; (void)stride; return false;
+}
+int gpu_backend_drain_nvenc(GpuBackend *b) { (void)b; return -1; }
 uint32_t* gpu_backend_calibration_buffer(GpuBackend *b) { (void)b; return NULL; }
 
 bool gpu_backend_decode_frame(GpuBackend *b, const uint8_t *p, int s,

@@ -56,7 +56,43 @@ VideoWriter *video_writer_create(const char *ffmpeg_path,
 bool video_writer_write_frame(VideoWriter *vw,
                               const uint8_t *frame, int stride);
 
+/* Write raw data (e.g., encoded H.264 packet) to the writer's pipe.
+ * Used for NVENC → ffmpeg muxer pipeline. Returns true on success. */
+bool video_writer_write_data(VideoWriter *vw, const uint8_t *data, int size);
+
 void video_writer_close(VideoWriter *vw);
+
+/* ─── H.264 Muxer (for NVENC output) ────────────────────────────── */
+
+/* Create an ffmpeg subprocess that muxes raw H.264 bitstream into a
+ * container (MKV/MP4). NVENC outputs raw H.264 AVCC-format packets;
+ * ffmpeg handles containerization with -c:v copy (no re-encode).
+ *
+ * The caller writes raw H.264 NAL units (4-byte length-prefixed AVCC
+ * format) to the returned pipe's stdin.
+ *
+ * Returns NULL on failure. The writer should be closed with
+ * video_writer_close(). */
+VideoWriter *video_writer_create_h264_muxer(const char *ffmpeg_path,
+                                             const char *path,
+                                             int width, int height,
+                                             double fps);
+
+/* Same as video_writer_create_h264_muxer, but writes SPS+PPS extradata
+ * (in AVCC format with 4-byte length prefixes) to the pipe immediately
+ * after opening. This allows the H.264 demuxer to initialize before
+ * any frame data arrives — essential for async NVENC pipelines where
+ * the muxer must be opened before the first async frame completes.
+ *
+ * 'extradata': SPS + PPS NAL units in AVCC format (4-byte length-prefixed).
+ *              May be NULL if no extradata is available.
+ * 'extradata_size': size of extradata in bytes. */
+VideoWriter *video_writer_create_h264_muxer_extradata(const char *ffmpeg_path,
+                                                       const char *path,
+                                                       int width, int height,
+                                                       double fps,
+                                                       const uint8_t *extradata,
+                                                       int extradata_size);
 
 /* ─── Utility ─────────────────────────────────────────────────────── */
 

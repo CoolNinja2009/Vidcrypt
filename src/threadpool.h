@@ -23,6 +23,7 @@ typedef struct ThreadPool ThreadPool;
 ThreadPool *threadpool_create(int num_threads, work_func_t work_func);
 void threadpool_destroy(ThreadPool *pool);
 int threadpool_submit(ThreadPool *pool, WorkItem *item);
+int threadpool_submit_batch(ThreadPool *pool, WorkItem *items, int count);
 int threadpool_pending(ThreadPool *pool);
 void threadpool_wait(ThreadPool *pool);
 

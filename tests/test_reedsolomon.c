@@ -159,12 +159,62 @@ static void test_rs_uncorrectable(void) {
     PASS();
 }
 
+static void test_parity_dict(void) {
+    TEST("Parity dictionary correctness (RS32)");
+    RSCodec codec;
+    ASSERT(rs_codec_init(&codec, 32), "Failed to init RS(255,223)");
+
+    int k = (int)codec.msg_length;
+    int n_k = (int)codec.ecc_symbols;
+    int dict_stride = 256 * n_k;
+
+    ASSERT(codec.parity_dict != NULL, "Dictionary not allocated");
+    ASSERT(codec.parity_dict_size == (size_t)k * 256 * (size_t)n_k,
+           "Dictionary size wrong");
+
+    /* Verify dictionary against the existing rs_encode for 100 random messages */
+    for (int trial = 0; trial < 100; ++trial) {
+        uint8_t msg[256] = {0};   /* zero-padded */
+        for (int i = 0; i < k; ++i)
+            msg[i] = (uint8_t)(rand() & 0xFF);
+
+        /* Reference: existing rs_encode */
+        uint8_t ref_enc[255];
+        rs_encode(&codec, msg, k, ref_enc);
+
+        /* Dictionary-based parity computation */
+        uint8_t dict_parity[32] = {0};
+        for (int i = 0; i < k; ++i) {
+            uint8_t v = msg[i];
+            const uint8_t *row = codec.parity_dict
+                + (size_t)i * (size_t)dict_stride
+                + (size_t)v * (size_t)n_k;
+            for (int j = 0; j < n_k; ++j)
+                dict_parity[j] ^= row[j];
+        }
+
+        /* Compare parity bytes */
+        for (int j = 0; j < n_k; ++j) {
+            if (dict_parity[j] != ref_enc[k + j]) {
+                char buf[128];
+                snprintf(buf, sizeof(buf),
+                         "Dict parity[%d] mismatch (trial %d): dict=%02x ref=%02x",
+                         j, trial, dict_parity[j], ref_enc[k + j]);
+                FAIL(buf);
+                return;
+            }
+        }
+    }
+    PASS();
+}
+
 int main(void) {
     printf("=== Reed-Solomon Tests ===\n\n");
 
     gf256_init();
 
     test_gf_arithmetic();
+    test_parity_dict();
     test_rs32_encode_decode();
     test_rs32_error_correction();
     test_rs16();

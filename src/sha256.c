@@ -29,17 +29,30 @@ static const uint32_t K[64] = {
 #define SIG0(x) (ROTR(x, 7) ^ ROTR(x, 18) ^ ((x) >> 3))
 #define SIG1(x) (ROTR(x, 17) ^ ROTR(x, 19) ^ ((x) >> 10))
 
+/* LUT for MSB byte-swap on little-endian (fast bswap via single instruction) */
+#if defined(_MSC_VER)
+#include <stdlib.h>
+#define BSWAP32(x) _byteswap_ulong(x)
+#elif defined(__GNUC__) || defined(__clang__)
+#define BSWAP32(x) __builtin_bswap32(x)
+#else
+#define BSWAP32(x) ((((x) & 0xFF) << 24) | (((x) >> 8) & 0xFF00) | \
+                     (((x) << 8) & 0xFF0000) | (((x) >> 24) & 0xFF))
+#endif
+
 typedef struct {
     uint32_t state[8];
     uint64_t count;
     uint8_t  buffer[64];
 } SHA256_CTX;
 
+/* Optimized transform: uses bswap + 64-bit reads for message schedule setup */
 static void sha256_transform(SHA256_CTX *ctx, const uint8_t block[64]) {
     uint32_t W[64];
+    /* Fast 64-bit load + bswap for first 16 words (big-endian → host) */
+    const uint32_t *src32 = (const uint32_t *)block;
     for (int i = 0; i < 16; ++i)
-        W[i] = ((uint32_t)block[i * 4] << 24) | ((uint32_t)block[i * 4 + 1] << 16)
-             | ((uint32_t)block[i * 4 + 2] << 8) | (uint32_t)block[i * 4 + 3];
+        W[i] = BSWAP32(src32[i]);
     for (int i = 16; i < 64; ++i)
         W[i] = SIG1(W[i - 2]) + W[i - 7] + SIG0(W[i - 15]) + W[i - 16];
 
@@ -90,7 +103,7 @@ static void sha256_final(SHA256_CTX *ctx, uint8_t hash[32]) {
     memset(ctx->buffer + idx, 0, 56 - idx);
     uint64_t bits = ctx->count * 8;
     for (int i = 0; i < 8; ++i)
-        ctx->buffer[56 + i] = (uint8_t)(bits >> (56 - i * 8));
+        ctx->buffer[56 + i] = (uint8_t)(bits >> (56 - (int)(i) * 8));
     sha256_transform(ctx, ctx->buffer);
     for (int i = 0; i < 8; ++i) {
         hash[i * 4]     = (uint8_t)(ctx->state[i] >> 24);

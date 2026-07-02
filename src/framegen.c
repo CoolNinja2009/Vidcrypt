@@ -64,12 +64,7 @@ void precomputed_frame_destroy(PrecomputedFrame *pf) {
 }
 
 uint8_t *precomputed_frame_generate(PrecomputedFrame *pf, const uint8_t *bits) {
-    /* Zero out payload region */
-    for (int y = pf->pay_y_start; y < pf->pay_y_end; ++y)
-        memset(pf->work + (size_t)y * (size_t)pf->stride + (size_t)pf->pay_x_start,
-               0, (size_t)(pf->pay_x_end - pf->pay_x_start));
-
-    /* Expand bits into payload region */
+    /* Expand bits into payload region — overwrites all pixels, no pre-clear needed */
     tile_expand_bits(bits, pf->work, pf->stride,
                      pf->pay_y_start, pf->pay_x_start,
                      pf->block_size,

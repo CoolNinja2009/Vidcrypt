@@ -43,15 +43,16 @@ extern "C" {
  *  ACTIVE LOGGING (VIDCRYPT_LOG_ENABLE defined)                      *
  * ═══════════════════════════════════════════════════════════════════ */
 
-#ifdef VIDCRYPT_LOG_ENABLE
-
-/* ─── Log levels ─────────────────────────────────────────────────── */
+/* ─── Log level enum ─────────────────────────────────────────────── */
 typedef enum {
     LOG_DEBUG = 0,
     LOG_INFO  = 1,
     LOG_WARN  = 2,
     LOG_ERROR = 3,
 } LogLevel;
+
+#ifdef VIDCRYPT_LOG_ENABLE
+
 
 /* ─── Lifecycle ──────────────────────────────────────────────────── */
 /* Initialize the logger. Creates log/ directory and opens a new

@@ -12,13 +12,29 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 #include <time.h>
 
 void decoder_config_defaults(DecoderConfig *config) {
     memset(config, 0, sizeof(DecoderConfig));
-    config->num_workers = 1;
+    config->num_workers = 0;  /* 0 = auto-detect CPU count */
     config->backend_mode = BACKEND_CPU;
     config->output_dir[0] = '\0';
+}
+
+static int cpu_core_count(void) {
+#ifdef _WIN32
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return (int)si.dwNumberOfProcessors;
+#else
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return (int)(n > 0 ? n : 4);
+#endif
 }
 
 typedef struct {
@@ -580,9 +596,8 @@ bool decoder_decode_file(const char *input_path, const DecoderConfig *config,
     int rs_hard_failures = 0;
     int rs_corrections = 0;
 
-    /* Thread pool (CPU path only) */
     int num_workers = config->num_workers;
-    if (num_workers <= 0) num_workers = 1;
+    if (num_workers <= 0) num_workers = cpu_core_count();
 
     ThreadPool *pool = NULL;
     if (!use_gpu) {

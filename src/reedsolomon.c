@@ -8,6 +8,10 @@
 uint8_t gf_log[256];
 uint8_t gf_exp[512];
 
+/* Full 256x256 GF(256) multiplication LUT — 64 KB, fits in L2 cache.
+ * Single lookup replaces log+add+exp+conditional. */
+uint8_t gf_mul_table[256][256];
+
 static bool tables_initialized = false;
 
 void gf256_init(void) {
@@ -26,6 +30,19 @@ void gf256_init(void) {
     gf_log[0] = 0;
     for (int i = 0; i < 255; ++i) {
         gf_exp[255 + i] = gf_exp[i];
+    }
+
+    /* Precompute full multiplication table */
+    for (int a = 0; a < 256; ++a) {
+        gf_mul_table[0][a] = 0;
+        gf_mul_table[a][0] = 0;
+    }
+    for (int a = 1; a < 256; ++a) {
+        int log_a = gf_log[a];
+        for (int b = 1; b < 256; ++b) {
+            int sum = log_a + gf_log[b];
+            gf_mul_table[a][b] = gf_exp[sum >= 255 ? sum - 255 : sum];
+        }
     }
 }
 
@@ -50,6 +67,85 @@ bool rs_codec_init(RSCodec *codec, int ecc_symbols) {
         for (int j = 0; j <= ecc_symbols; ++j)
             codec->generator[j] ^= gf_mul(tmp[j], root);
     }
+
+    /* ── Build parity dictionary for GPU/AVX2 acceleration ────────────
+     * RS systematic encoding is linear:  parity = message × P
+     * where P is a k×(n-k) matrix over GF(256).
+     *
+     * P[i][j] = coefficient of x^j in (x^(i+n-k) mod g(x))
+     * Dict[i][v][j] = gf_mul(v, P[i][j])
+     *
+     * During encoding: parity[j] = XOR over i of Dict[i][msg[i]][j].
+     * This replaces sequential polynomial division with pure XOR —
+     * zero GF arithmetic on the hot path.                          */
+    {
+        int k   = (int)codec->msg_length;
+        int n_k = (int)codec->ecc_symbols;
+        int dict_stride = 256 * n_k;  /* bytes per message position */
+        codec->parity_dict_size = (size_t)k * (size_t)dict_stride;
+        codec->parity_dict = (uint8_t *)malloc(codec->parity_dict_size);
+        if (!codec->parity_dict) { return false; }
+
+        /* Step 1: compute P matrix iteratively.
+         * P[0] = x^n_k mod g(x) = lower coefficients of g(x).
+         * P[i+1] = x * P[i] mod g(x).                              */
+        uint8_t *P = (uint8_t *)calloc((size_t)k * (size_t)n_k, 1);
+        if (!P) { free(codec->parity_dict); codec->parity_dict = NULL; return false; }
+
+        memcpy(P, codec->generator, (size_t)n_k);  /* P[0][*] = g[*] */
+
+        for (int i = 1; i < k; ++i) {
+            uint8_t *prev = P + (size_t)(i - 1) * (size_t)n_k;
+            uint8_t *cur  = P + (size_t)i * (size_t)n_k;
+            uint8_t high  = prev[n_k - 1];
+            if (high != 0) {
+                for (int j = n_k - 1; j > 0; --j)
+                    cur[j] = prev[j - 1] ^ gf_mul(high, codec->generator[j]);
+                cur[0] = gf_mul(high, codec->generator[0]);
+            } else {
+                for (int j = n_k - 1; j > 0; --j)
+                    cur[j] = prev[j - 1];
+                cur[0] = 0;
+            }
+        }
+
+        /* Reverse P so P[i] = x^(n-1-i) mod g(x).
+         * Message byte m_i (at position i) contributes x^(k-1-i+n_k) = x^(254-i).
+         * Currently P[0]=x^32, P[1]=x^33, ..., P[222]=x^254 — need reversed. */
+        for (int i = 0; i < k / 2; ++i) {
+            int ri = k - 1 - i;
+            for (int j = 0; j < n_k; ++j) {
+                uint8_t tmp = P[i * n_k + j];
+                P[i * n_k + j]      = P[ri * n_k + j];
+                P[ri * n_k + j]     = tmp;
+            }
+        }
+
+        /* Step 2: build dictionary from P (with parity byte order reversal).
+         *
+         * rs_encode stores parity as: encoded[k+i] = bb[ecc-1-i].
+         * So encoded[k+0] = coefficient of x^(n_k-1), and
+         *    encoded[k+n_k-1] = coefficient of x^0.
+         *
+         * The GPU kernel writes: enc[k + parity_j] where parity_j is the
+         * thread index, and thread j computes the coefficient of x^j.
+         *
+         * To match rs_encode's output, Dict[i][v][parity_j] must give the
+         * contribution to encoded[k + parity_j] = bb[n_k-1-parity_j]
+         * = coefficient of x^(n_k-1-parity_j).
+         *
+         * So: Dict[i][v][j] = gf_mul(v, P[i][n_k-1-j])              */
+        for (int i = 0; i < k; ++i) {
+            uint8_t *dict_pos = codec->parity_dict + (size_t)i * (size_t)dict_stride;
+            for (int v = 0; v < 256; ++v) {
+                uint8_t *dict_v = dict_pos + (size_t)v * (size_t)n_k;
+                for (int j = 0; j < n_k; ++j)
+                    dict_v[j] = gf_mul_table[v][P[i * n_k + (n_k - 1 - j)]];
+            }
+        }
+        free(P);
+    }
+
     return true;
 }
 

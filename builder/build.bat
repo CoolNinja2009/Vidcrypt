@@ -1,5 +1,6 @@
 @echo off
 setlocal
+cd ..
 
 echo =====================================
 echo VIDCRYPT-V8 Build Script

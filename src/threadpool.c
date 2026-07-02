@@ -121,6 +121,27 @@ int threadpool_submit(ThreadPool *pool, WorkItem *item) {
     return 0;
 }
 
+int threadpool_submit_batch(ThreadPool *pool, WorkItem *items, int count) {
+    if (count <= 0) return 0;
+    pthread_mutex_lock(&pool->mutex);
+    /* Wait for enough space — never block for long since workers drain fast */
+    while (pool->count + count > pool->capacity)
+        pthread_cond_wait(&pool->cond_nonfull, &pool->mutex);
+    for (int i = 0; i < count; ++i) {
+        pool->queue[pool->tail] = items[i];
+        pool->tail = (pool->tail + 1) % pool->capacity;
+    }
+    pool->count += count;
+    pool->in_flight += count;
+    /* Wake all workers */
+    if (count > 1)
+        pthread_cond_broadcast(&pool->cond_nonempty);
+    else
+        pthread_cond_signal(&pool->cond_nonempty);
+    pthread_mutex_unlock(&pool->mutex);
+    return 0;
+}
+
 int threadpool_pending(ThreadPool *pool) {
     pthread_mutex_lock(&pool->mutex);
     int c = pool->count;

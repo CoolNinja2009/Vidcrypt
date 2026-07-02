@@ -45,6 +45,17 @@ void frame_generate_kernel(dim3 grid, dim3 block,
                             int block_size, int grid_cols, int payload_rows,
                             cudaStream_t stream);
 
+/* ─── frame_generate_gray ────────────────────────────────────────────
+ * Same as frame_generate but writes 1 byte/pixel grayscale (stride=width)
+ * instead of 3 byte/pixel BGR24 (stride=width*3). Output can be used
+ * directly as NV12 Y plane — no BGR24→gray conversion needed. */
+void frame_generate_gray_kernel(dim3 grid, dim3 block,
+                                 uint8_t *frame, int stride,
+                                 const uint8_t *bits,
+                                 int pay_y, int pay_x,
+                                 int block_size, int grid_cols, int payload_rows,
+                                 cudaStream_t stream);
+
 /* ─── bgr24_to_bgra32 ────────────────────────────────────────────────
  * Convert packed BGR24 to BGRA32 (alpha=0xFF) for NVENC input.
  * Both src and dst are GPU device pointers.
@@ -133,6 +144,64 @@ void extract_calibration_bits_kernel(
     int width, int height,
     uint8_t *bits_out,
     cudaStream_t stream);
+
+/* ─── bgr24_to_nv12 ───────────────────────────────────────────────────
+ * Convert packed BGR24 (grayscale content) to NV12 format.
+ * Y plane = G channel (luma, W×H). UV plane = neutral 128 (W/2×H/2×2).
+ * Both dst planes are GPU device pointers.
+ * dst_y_pitch = dst_uv_pitch = width. */
+void bgr24_to_nv12_kernel(dim3 grid, dim3 block,
+                           const uint8_t *src, int src_stride,
+                           uint8_t *dst_y, int dst_y_pitch,
+                           uint8_t *dst_uv, int dst_uv_pitch,
+                           int width, int height,
+                           cudaStream_t stream);
+
+/* ─── rs_encode_dict ───────────────────────────────────────────────────
+ * Dictionary-based Reed-Solomon encoder kernel.
+ * Computes parity bytes for N codewords in parallel.
+ *
+ * One warp (n_k threads) per codeword.
+ * For each message byte, looks up its contribution to all n_k parity
+ * bytes from the precomputed dictionary — pure XOR, zero GF arithmetic.
+ *
+ * Grid: N blocks × 1 × 1   (N = number of codewords)
+ * Block: n_k × 1 × 1       (one thread per parity symbol)
+ *
+ * d_msg:      [N * k] padded message bytes
+ * d_dict:     [k * 256 * n_k] precomputed parity dictionary
+ * d_parity:   [N * n_k] output parity bytes
+ * d_encoded:  [N * 255] output: first k bytes = msg, then n_k bytes = parity
+ * k:          message length (223 for RS32)
+ * n_k:        parity symbols (32 for RS32)
+ * N:          number of codewords
+ *
+ * Launched on the given CUDA stream. */
+void rs_encode_dict_kernel(
+    const uint8_t *d_msg, const uint8_t *d_dict,
+    uint8_t *d_encoded,
+    int k, int n_k, int N,
+    cudaStream_t stream);
+
+/* ─── bit_expand ───────────────────────────────────────────────────────
+ * Expand encoded bytes into per-bit bytes (0 or 1) using LUT64.
+ * Each input byte → 8 output bytes, each being 0 or 1.
+ *
+ * Grid: ceil(total_bytes / 256) × 1 × 1
+ * Block: 256 × 1 × 1
+ *
+ * d_encoded:   input bytes
+ * d_bits:      output bit bytes (8x size), cast as uint64 for 8-byte writes
+ * total_bytes: number of input bytes to expand
+ *
+ * Launched on the given CUDA stream. */
+void bit_expand_kernel(
+    const uint8_t *d_encoded, uint64_t *d_bits,
+    int total_bytes,
+    cudaStream_t stream);
+
+/* Upload BYTE_TO_BITS_LUT to GPU constant memory (call once at init). */
+void gpu_upload_lut64(void);
 
 #ifdef __cplusplus
 }

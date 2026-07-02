@@ -1,9 +1,10 @@
 @echo off
-setlocal enabledelayedexpansionecho ========================================
- echo  VIDCRYPT-V8 Build Script — Verbose
- echo  (Profiling + Logging + AVX2)
- echo ========================================
- echo.
+setlocal enabledelayedexpansion
+echo ========================================
+echo  VIDCRYPT-V8 Build Script - Verbose
+echo  (Profiling + Logging + AVX2)
+echo ========================================
+echo.
 
  if not exist build_verbose (
      echo [*] Creating build_verbose directory...

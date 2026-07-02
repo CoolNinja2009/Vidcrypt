@@ -13,12 +13,16 @@ extern "C" {
 extern uint8_t gf_log[256];
 extern uint8_t gf_exp[512];
 
+/* Full 256x256 precomputed multiplication table — replaces log/exp lookups
+ * with a single memory load. 64 KB fits in L2 cache. ~2x faster for RS encode.
+ * Initialized at startup by gf256_init(), so non-const. */
+extern uint8_t gf_mul_table[256][256];
+
 void gf256_init(void);
 
+/* LUT-based fast multiplication (single lookup, no branches) */
 static inline uint8_t gf_mul(uint8_t a, uint8_t b) {
-    if (a == 0 || b == 0) return 0;
-    int sum = (int)gf_log[a] + (int)gf_log[b];
-    return gf_exp[sum >= 255 ? sum - 255 : sum];
+    return gf_mul_table[a][b];
 }
 
 static inline uint8_t gf_div(uint8_t a, uint8_t b) {
@@ -48,6 +52,13 @@ typedef struct {
     uint8_t  block_length;
     uint8_t  generator[256];
     uint8_t  gen_degree;
+    /* Precomputed parity dictionary for GPU/AVX2 acceleration.
+     * Layout: dict[i * (256 * n_k) + v * n_k + j] = contribution of
+     * byte value 'v' at message position 'i' to parity byte 'j'.
+     * Size = k * 256 * n_k bytes (~1.8 MB for RS(255,223,32)).
+     * NULL if not yet computed. Owned by the codec cache. */
+    uint8_t *parity_dict;
+    size_t   parity_dict_size;
 } RSCodec;
 
 bool rs_codec_init(RSCodec *codec, int ecc_symbols);

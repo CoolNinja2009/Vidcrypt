@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include "calibration.h"
 #include "framegen.h"
+#include "backend.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -19,6 +20,7 @@ typedef struct EncoderConfig {
     int  rs_ecc_symbols;
     double fps;
     int  num_workers;
+    BackendMode backend_mode;   /* BACKEND_CPU (default) or BACKEND_GPU */
 
     const char *codec_name;
 
@@ -49,6 +51,21 @@ bool encoder_encode_file(const char *input_path, const EncoderConfig *config,
                          EncoderResult *result, char *error_msg, int error_msg_size);
 
 void encoder_config_defaults(EncoderConfig *config);
+
+/* Compute grid layout parameters from encoder config.
+ * Shared by CPU and GPU encode paths. */
+bool compute_grid_params(const EncoderConfig *config, CalParams *params,
+                         char *error_msg, int error_msg_size);
+
+#ifdef USE_CUDA
+/* GPU-accelerated encode via CUDA frame generation + NVENC hardware encode.
+ * Called automatically from encoder_encode_file() when config->backend_mode
+ * is BACKEND_GPU. Requires CUDA + NVENC at compile time. */
+bool encoder_encode_file_gpu(const char *input_path, const EncoderConfig *config,
+                              EncoderResult *result,
+                              char *error_msg, int error_msg_size);
+#endif
+
 
 #ifdef __cplusplus
 }

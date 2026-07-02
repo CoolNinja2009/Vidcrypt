@@ -9,6 +9,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 #include <time.h>
 #include <pthread.h>
 
@@ -16,6 +21,18 @@
 #define fseeko _fseeki64
 #define ftello _ftelli64
 #endif
+
+
+static int cpu_core_count(void) {
+#ifdef _WIN32
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return (int)si.dwNumberOfProcessors;
+#else
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return (int)(n > 0 ? n : 4);
+#endif
+}
 
 void encoder_config_defaults(EncoderConfig *config) {
     memset(config, 0, sizeof(EncoderConfig));
@@ -25,8 +42,8 @@ void encoder_config_defaults(EncoderConfig *config) {
     config->margin_y        = DEFAULT_MARGIN_Y;
     config->block_size      = DEFAULT_BLOCK_SIZE;
     config->rs_ecc_symbols  = DEFAULT_RS_ECC_SYMBOLS;
-    config->fps             = 30.0;  /* default: 30 fps for higher density */
-    config->num_workers     = 1;
+    config->fps             = 30.0;
+    config->num_workers     = 0;  /* 0 = auto-detect CPU count */
     config->codec_name      = NULL;
 }
 
@@ -162,7 +179,7 @@ bool encoder_encode_file(const char *input_path, const EncoderConfig *config,
     fseeko(in, 0, SEEK_SET);
 
     int n_workers = config->num_workers;
-    if (n_workers <= 0) n_workers = 4;
+    if (n_workers <= 0) n_workers = cpu_core_count();
 
     int batch_size = n_workers * 4;
     if (batch_size < 8) batch_size = 8;
@@ -262,10 +279,11 @@ bool encoder_encode_file(const char *input_path, const EncoderConfig *config,
 
     int frame_size = (int)params.frame_width * (int)params.frame_height; /* gray8 */
     EncoderJob *jobs = (EncoderJob *)calloc((size_t)batch_size, sizeof(EncoderJob));
+    WorkItem *work_items = (WorkItem *)calloc((size_t)batch_size, sizeof(WorkItem));
     uint8_t *batch_bits   = (uint8_t *)malloc((size_t)batch_size * (size_t)pay_bits);
     uint8_t *batch_frames = (uint8_t *)malloc((size_t)batch_size * (size_t)frame_size);
-    if (!jobs || !batch_bits || !batch_frames) {
-        free(jobs); free(batch_bits); free(batch_frames);
+    if (!jobs || !work_items || !batch_bits || !batch_frames) {
+        free(jobs); free(work_items); free(batch_bits); free(batch_frames);
         free(bit_buffer); video_writer_close(vw);
         for (int i = 0; i < gen_ctx_count; ++i) precomputed_frame_destroy(&gen_ctx[i].pf);
         free(gen_ctx); fclose(in);
@@ -278,7 +296,7 @@ bool encoder_encode_file(const char *input_path, const EncoderConfig *config,
 
     ThreadPool *pool = threadpool_create(n_workers, encoder_worker_func);
     if (!pool) {
-        free(jobs); free(batch_bits); free(batch_frames);
+        free(jobs); free(work_items); free(batch_bits); free(batch_frames);
         free(bit_buffer); video_writer_close(vw);
         for (int i = 0; i < gen_ctx_count; ++i) precomputed_frame_destroy(&gen_ctx[i].pf);
         free(gen_ctx); fclose(in);
@@ -287,7 +305,7 @@ bool encoder_encode_file(const char *input_path, const EncoderConfig *config,
 
     uint8_t *chunk_data = (uint8_t *)malloc((size_t)chunk_size);
     if (!chunk_data) {
-        threadpool_destroy(pool); free(jobs); free(batch_bits); free(batch_frames);
+        threadpool_destroy(pool); free(jobs); free(work_items); free(batch_bits); free(batch_frames);
         free(bit_buffer); video_writer_close(vw);
         for (int i = 0; i < gen_ctx_count; ++i) precomputed_frame_destroy(&gen_ctx[i].pf);
         free(gen_ctx); fclose(in);
@@ -307,7 +325,7 @@ bool encoder_encode_file(const char *input_path, const EncoderConfig *config,
             uint8_t *padded = (uint8_t *)calloc((size_t)msg_len, 1);
             if (!padded) {
                 fclose(in); free(chunk_data);
-                threadpool_destroy(pool); free(jobs); free(batch_bits); free(batch_frames);
+                threadpool_destroy(pool); free(jobs); free(work_items); free(batch_bits); free(batch_frames);
                 free(bit_buffer); video_writer_close(vw);
                 for (int i = 0; i < gen_ctx_count; ++i) precomputed_frame_destroy(&gen_ctx[i].pf);
                 free(gen_ctx);
@@ -338,14 +356,14 @@ bool encoder_encode_file(const char *input_path, const EncoderConfig *config,
                     jobs[i].seq        = result->total_frames + i;
                 }
 
-                prof_stage_begin(&prof_ctx, PROF_ENCODE_FRAME_GENERATE);
+                /* Fill work_items for batch submit */
                 for (int i = 0; i < count; ++i) {
-                    WorkItem item;
-                    memset(&item, 0, sizeof(item));
-                    item.data = &jobs[i];
-                    item.data_size = 0;
-                    threadpool_submit(pool, &item);
+                    work_items[i].data = &jobs[i];
+                    work_items[i].data_size = 0;
                 }
+
+                prof_stage_begin(&prof_ctx, PROF_ENCODE_FRAME_GENERATE);
+                threadpool_submit_batch(pool, work_items, count);
                 threadpool_wait(pool);
                 prof_stage_end(&prof_ctx, PROF_ENCODE_FRAME_GENERATE);
 
@@ -389,14 +407,14 @@ bool encoder_encode_file(const char *input_path, const EncoderConfig *config,
             jobs[i].seq        = result->total_frames + i;
         }
 
-        prof_stage_begin(&prof_ctx, PROF_ENCODE_FRAME_GENERATE);
+        /* Fill work_items for batch submit */
         for (int i = 0; i < count; ++i) {
-            WorkItem item;
-            memset(&item, 0, sizeof(item));
-            item.data = &jobs[i];
-            item.data_size = 0;
-            threadpool_submit(pool, &item);
+            work_items[i].data = &jobs[i];
+            work_items[i].data_size = 0;
         }
+
+        prof_stage_begin(&prof_ctx, PROF_ENCODE_FRAME_GENERATE);
+        threadpool_submit_batch(pool, work_items, count);
         threadpool_wait(pool);
         prof_stage_end(&prof_ctx, PROF_ENCODE_FRAME_GENERATE);
 
@@ -423,7 +441,7 @@ bool encoder_encode_file(const char *input_path, const EncoderConfig *config,
     }
 
     threadpool_destroy(pool);
-    free(jobs);
+    free(jobs); free(work_items);
     free(batch_bits);
     free(batch_frames);
     free(bit_buffer);

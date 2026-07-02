@@ -64,6 +64,8 @@ set(CORE_SOURCES
     src/ffmpeg_pipe.c
     src/profiling.c
     src/logutil.c
+    src/gpu_backend.c
+    src/libav_decoder.c
 )
 
 add_library(vidcrypt STATIC ${CORE_SOURCES})
@@ -85,15 +87,11 @@ if(USE_CUDA)
     # Target architectures: SASS for modern GPUs + PTX for backward compat
     # RTX 5070 = sm_120 (Blackwell consumer). CUDA 12.6 supports up to sm_90,
     # so we include sm_90 PTX for driver JIT-compilation on Blackwell.
-    set(VIDCRYPT_CUDA_ARCHS "50-virtual;75;86;89;90;90-virtual")
-
     set(GPU_SOURCES
-        src/gpu_backend.c
         src/gpu_kernels.cu
         src/gpu_presets.c
         src/gpu_nvenc.c
         src/ffmpeg_hwdecoder.c
-        src/libav_decoder.c
     )
 
     target_sources(vidcrypt PRIVATE ${GPU_SOURCES})
