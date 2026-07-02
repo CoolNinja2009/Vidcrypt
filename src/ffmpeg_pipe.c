@@ -351,17 +351,24 @@ VideoWriter *video_writer_create(const char *ffmpeg_path,
      * (transform-bypass / QP 0 mode). CRF 10 is visually lossless with
      * sharp tile edges preserved — any pixel-level errors are handled
      * by RS(255,223,32) ECC which corrects up to 16 bytes per block.
-     * Other codecs (ffv1) are inherently lossless. */
+     * Other codecs (ffv1) are inherently lossless.
+     * For NVENC: use CQP (constant QP) instead of CRF — NVENC doesn't support CRF. */
     char quality[64] = "";
     if (strcmp(codec_name, "h264") == 0 || strcmp(codec_name, "libx264") == 0 ||
         strcmp(codec_name, "hevc") == 0 || strcmp(codec_name, "libx265") == 0)
         snprintf(quality, sizeof(quality), " -crf 10 -preset ultrafast");
-    /* For H.264/H.265, output yuv420p so NVDEC hardware decoders can handle it.
-     * Grayscale (4:0:0) is not supported by NVDEC. The encoder pads
-     * chroma planes to 128 (mid-gray) automatically from gray8 input. */
+    else if (strcmp(codec_name, "h264_nvenc") == 0)
+        snprintf(quality, sizeof(quality), " -rc constqp -qp 10 -preset p1");
+    else if (strcmp(codec_name, "hevc_nvenc") == 0)
+        snprintf(quality, sizeof(quality), " -rc constqp -qp 10 -preset p1");
+    /* For H.264/H.265 — output yuv420p so NVDEC hardware decoders can handle it.
+     * Grayscale (4:0:0) is not supported by NVDEC. NVENC also produces
+     * incompatible gbrp format when given gray input. */
     const char *out_pix_fmt = "gray";
     if (strcmp(codec_name, "h264") == 0 || strcmp(codec_name, "libx264") == 0 ||
-        strcmp(codec_name, "hevc") == 0 || strcmp(codec_name, "libx265") == 0)
+        strcmp(codec_name, "h264_nvenc") == 0 ||
+        strcmp(codec_name, "hevc") == 0 || strcmp(codec_name, "libx265") == 0 ||
+        strcmp(codec_name, "hevc_nvenc") == 0)
         out_pix_fmt = "yuv420p";
 
     char cmd[8192];
