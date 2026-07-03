@@ -28,6 +28,14 @@ warn()  { echo "  [!!] $*"; }
 info()  { echo "  [*] $*"; }
 found() { echo "  [+] $*"; }
 
+# ── Java flag (--no-java) ────────────────────────────────────────────
+USE_JAVA="ON"
+if [[ "${1:-}" == "--no-java" ]]; then
+    USE_JAVA="OFF"
+    info "--no-java flag set ─ skipping Java tile decoder"
+    shift
+fi
+
 # ── Check cmake ─────────────────────────────────────────────────────
 echo "── Prerequisites ──"
 have cmake || die "cmake not found. Install: $PKG_MGR cmake"
@@ -101,13 +109,62 @@ else
     info "ffmpeg not found — install: $PKG_MGR ffmpeg"
 fi
 
+
+# ── Java detection (for JNI tile decoder) ───────────────────────────
+USE_JNI_TILES="OFF"
+JAVA_HOME_DETECTED=""
+
+if [[ "$USE_JAVA" == "OFF" ]]; then
+    info "Java tile decoder disabled via --no-java"
+elif [[ -n "${JAVA_HOME:-}" && -x "$JAVA_HOME/bin/javac" ]]; then
+    JAVA_HOME_DETECTED="$JAVA_HOME"
+    found "Java: $JAVA_HOME"
+    USE_JNI_TILES="ON"
+elif have javac; then
+    JAVA_HOME_DETECTED=$(dirname "$(dirname "$(readlink -f "$(which javac)")")")
+    found "Java: $(javac --version 2>&1)"
+    USE_JNI_TILES="ON"
+else
+    info "Java not found — JNI tile decoder disabled"
+    if [[ "$OS" == "Linux" ]]; then
+        info "  Install: $PKG_MGR openjdk-21-jdk"
+    elif [[ "$OS" == "Darwin" ]]; then
+        info "  Install: brew install openjdk@21"
+    fi
+fi
+
+# ── Compile Java tile decoder ──────────────────────────────────────
+if [[ "$USE_JNI_TILES" == "ON" ]]; then
+    echo ""
+    echo "[*] Compiling Java tile decoder..."
+
+    JAVA_SRC="$PROJECT_DIR/vidcrypt-java/vidcrypt-core/src/main/java/com/vidcrypt"
+    JAVA_OUT="$PROJECT_DIR/vidcrypt-java/out"
+
+    rm -rf "$JAVA_OUT"
+    mkdir -p "$JAVA_OUT"
+
+    "$JAVA_HOME_DETECTED/bin/javac" --enable-preview --release 21 \
+        -d "$JAVA_OUT" --add-modules jdk.incubator.vector \
+        "$JAVA_SRC/frame/JniTileDecoder.java" \
+        "$JAVA_SRC/frame/TileDecoder.java" \
+        "$JAVA_SRC/frame/DecodeGeometry.java" \
+        "$JAVA_SRC/calibration/CalParams.java" \
+        "$JAVA_SRC/hash/Crc16.java" \
+        || die "Java compilation failed"
+
+    "$JAVA_HOME_DETECTED/bin/jar" cf "$PROJECT_DIR/vidcrypt-tiles.jar" -C "$JAVA_OUT" . \
+        || die "JAR creation failed"
+
+    found "vidcrypt-tiles.jar created"
+fi
 echo ""
 
 # ── Summary ─────────────────────────────────────────────────────────
 echo "── Build plan ──"
 echo "  Type:      $BUILD_LABEL"
 echo "  Directory: $BUILD_DIR"
-echo "  Flags:     USE_CUDA=$USE_CUDA  ENABLE_AVX2=$ENABLE_AVX2"
+echo "  Flags:     USE_CUDA=$USE_CUDA  ENABLE_AVX2=$ENABLE_AVX2  USE_JNI_TILES=$USE_JNI_TILES"
 echo "  Parallel:  $NPROC jobs"
 echo ""
 
@@ -121,6 +178,8 @@ cmake "$PROJECT_DIR" \
     -DCMAKE_BUILD_TYPE=Release \
     -DUSE_CUDA="$USE_CUDA" \
     -DENABLE_AVX2="$ENABLE_AVX2" \
+    -DUSE_JNI_TILES="$USE_JNI_TILES" \
+    -DJAVA_HOME="$JAVA_HOME_DETECTED" \
     || die "CMake configuration failed. Check dependencies."
 
 # ── Build ───────────────────────────────────────────────────────────
@@ -128,6 +187,12 @@ echo ""
 echo "[*] Building ($NPROC parallel)..."
 cmake --build . --config Release --parallel "$NPROC" \
     || die "Build failed."
+
+# ── Copy Java JAR to build output ──────────────────────────────────
+if [[ "$USE_JNI_TILES" == "ON" ]]; then
+    cp "$PROJECT_DIR/vidcrypt-tiles.jar" "$BUILD_DIR/"
+    info "vidcrypt-tiles.jar copied to $BUILD_DIR/"
+fi
 
 # ── Done ────────────────────────────────────────────────────────────
 echo ""

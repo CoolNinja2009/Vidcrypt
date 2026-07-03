@@ -1,0 +1,4 @@
+plugins { id 'java-library' }
+dependencies {
+    implementation project(':vidcrypt-core')
+}

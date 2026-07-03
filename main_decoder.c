@@ -1,3 +1,6 @@
+#ifdef USE_JNI_TILES
+#include "tile_decode_jni.h"
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,6 +56,18 @@ int main(int argc, char **argv) {
         print_usage();
         return 1;
     }
+
+#ifdef USE_JNI_TILES
+    /* Find vidcrypt-tiles.jar next to the executable, or use -J override */
+    const char *java_cp = "vidcrypt-tiles.jar";
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "-J") == 0 || strcmp(argv[i], "--java-classpath") == 0) {
+            if (i + 1 < argc) java_cp = argv[++i];
+            break;
+        }
+    }
+    tile_decode_jni_init(java_cp);
+#endif
 
     log_init();
 

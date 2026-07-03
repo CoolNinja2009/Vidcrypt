@@ -65,6 +65,28 @@ The libavcodec approach eliminated the ffmpeg CLI pipe overhead while avoiding t
 NVDEC C API compatibility issues. The ~3MB frame transfer is fast enough via the
 async double-buffered pipeline (overlapped with CPU decode of the next frame).
 
+
+### Java JNI Tile Decode Acceleration (USE_JNI_TILES)
+
+When `-DUSE_JNI_TILES=ON` is passed to CMake, `tile_decode_grid()` delegates to
+Java's `TileDecoder` via the JNI Invocation API before falling back to C SIMD.
+
+**Files involved:**
+- `src/tile_decode_jni.c` — JNI wrapper: loads JVM, calls `JniTileDecoder.tileDecodeGrid`
+- `src/tile_decode_jni.h` — public API: `tile_decode_jni_init()`, `tile_decode_jni_available()`, `tile_decode_jni_shutdown()`
+- `src/simd_decode.c:224` — `#ifdef USE_JNI_TILES` block at top of `tile_decode_grid`
+- `vidcrypt-java/…/frame/JniTileDecoder.java` — JNI-callable entry point
+- `vidcrypt-java/…/frame/TileDecoder.java` — branchless tile decode (3-4x faster than C SIMD)
+
+**Performance:** On JIT-warmed paths, Java tile decode achieves 130-140K FPS vs C SIMD's 38K FPS (3.5x speedup). The JNI overhead is ~5-10μs per call, amortized over ~25K tiles per frame.
+
+**Build:** See `docs/BUILD.md` step 3 for compiling the Java module.
+
+**Runtime:** Pass `-J <classpath>` to vidcrypt-decoder to set the Java classpath.
+Default: `vidcrypt-java/out` relative to the binary.
+
+**Fallback:** If JVM creation fails or `JniTileDecoder` class is not found,
+the C SIMD path runs transparently with no user-visible change.
 ---
 
 ## Table of Contents

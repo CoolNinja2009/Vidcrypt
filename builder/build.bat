@@ -17,6 +17,8 @@ if /i "%~1"=="--cpu"     set "FORCE_CPU=1"
 if /i "%~1"=="--no-gpu"  set "FORCE_CPU=1"
 if /i "%~1"=="--gpu"     set "FORCE_GPU=1"
 if /i "%~1"=="--cuda"    set "FORCE_GPU=1"
+
+if /i "%~1"=="--no-java" set "FORCE_NO_JAVA=1"
 shift
 goto :parse_args
 :args_done
@@ -45,6 +47,45 @@ if not defined HAS_CC (
     pause & exit /b 1
 )
 echo   [+] Compiler: !CC_LABEL!
+
+REM ── Java detection (for JNI tile decoder) ───────────────────────
+set "USE_JNI_TILES=OFF"
+set "HAS_JAVA="
+set "JAVA_HOME_DETECTED="
+
+if defined FORCE_NO_JAVA (
+    echo   [*] --no-java flag set — skipping Java tile decoder
+    goto :java_done
+)
+
+REM Try JAVA_HOME first, then PATH
+if defined JAVA_HOME (
+    if exist "!JAVA_HOME!\bin\javac.exe" (
+        set "HAS_JAVA=1"
+        set "JAVA_HOME_DETECTED=!JAVA_HOME!"
+        echo   [+] Java: !JAVA_HOME!
+    )
+)
+if not defined HAS_JAVA (
+    where javac >nul 2>nul
+    if not errorlevel 1 (
+        for /f "tokens=*" %%i in ('javac --version 2^>^&1') do echo   [+] Java: %%i
+        set "HAS_JAVA=1"
+        REM Extract JAVA_HOME from javac path
+        for /f "tokens=*" %%i in ('where javac') do set "JAVAC_PATH=%%i"
+        if defined JAVAC_PATH (
+            for %%A in ("!JAVAC_PATH!") do set "JAVA_HOME_DETECTED=%%~dpA.."
+            set "JAVA_HOME_DETECTED=!JAVA_HOME_DETECTED:\bin\=!"
+        )
+    )
+)
+
+if defined HAS_JAVA (
+    set "USE_JNI_TILES=ON"
+) else (
+    echo   [*] Java not found — JNI tile decoder disabled
+)
+:java_done
 
 REM ── CPU info ──────────────────────────────────────────────────────
 set "NPROC=4"
@@ -132,6 +173,33 @@ echo   Flags:     USE_CUDA=!USE_CUDA!  ENABLE_AVX2=ON
 echo   Parallel:  !NPROC! jobs
 echo.
 
+REM ── Compile Java tile decoder ────────────────────────────────────
+if "!USE_JNI_TILES!"=="ON" (
+    echo.
+    echo [*] Compiling Java tile decoder...
+
+    set "JAVA_SRC=!PROJECT_DIR!\vidcrypt-java\vidcrypt-core\src\main\java\com\vidcrypt"
+    set "JAVA_OUT=!PROJECT_DIR!\vidcrypt-java\out"
+
+    if exist "!JAVA_OUT!" rmdir /s /q "!JAVA_OUT!"
+    mkdir "!JAVA_OUT!"
+
+    "!JAVA_HOME_DETECTED!\bin\javac" --enable-preview --release 21 -d "!JAVA_OUT!" --add-modules jdk.incubator.vector "!JAVA_SRC!\frame\JniTileDecoder.java" "!JAVA_SRC!\frame\TileDecoder.java" "!JAVA_SRC!\frame\DecodeGeometry.java" "!JAVA_SRC!\calibration\CalParams.java" "!JAVA_SRC!\hash\Crc16.java"
+    if errorlevel 1 (
+        echo [FAIL] Java compilation failed
+        pause ^& exit /b 1
+    )
+
+    REM Create JAR
+    "!JAVA_HOME_DETECTED!\bin\jar" cf "!PROJECT_DIR!\vidcrypt-tiles.jar" -C "!JAVA_OUT!" .
+    if errorlevel 1 (
+        echo [FAIL] JAR creation failed
+        pause ^& exit /b 1
+    )
+
+    echo   [+] vidcrypt-tiles.jar created
+)
+
 REM ── Create / enter build dir ──────────────────────────────────────
 if not exist "!BUILD_DIR!" mkdir "!BUILD_DIR!"
 cd /d "!BUILD_DIR!"
@@ -145,9 +213,9 @@ if exist CMakeCache.txt (
 REM ── Configure CMake ───────────────────────────────────────────────
 echo [*] Configuring CMake...
 if "!USE_CUDA!"=="ON" (
-    cmake "!PROJECT_DIR!" -G "!VS_GEN!" -A x64 -DUSE_CUDA=ON -DENABLE_AVX2=ON
+    cmake "!PROJECT_DIR!" -G "!VS_GEN!" -A x64 -DUSE_CUDA=ON -DENABLE_AVX2=ON -DUSE_JNI_TILES=!USE_JNI_TILES! -DJAVA_HOME="!JAVA_HOME_DETECTED!"
 ) else (
-    cmake "!PROJECT_DIR!" -DUSE_CUDA=OFF -DENABLE_AVX2=ON
+    cmake "!PROJECT_DIR!" -DUSE_CUDA=OFF -DENABLE_AVX2=ON -DUSE_JNI_TILES=!USE_JNI_TILES! -DJAVA_HOME="!JAVA_HOME_DETECTED!"
 )
 if errorlevel 1 (
     echo.
@@ -168,6 +236,17 @@ if errorlevel 1 (
     pause & exit /b 1
 )
 
+REM ── Copy JAR to output ──────────────────────────────────────────
+if "!USE_JNI_TILES!"=="ON" (
+    if "!USE_CUDA!"=="ON" (
+        copy /y "!PROJECT_DIR!\vidcrypt-tiles.jar" "!BUILD_DIR!\Release\" >nul
+        echo   [*] vidcrypt-tiles.jar copied to !BUILD_DIR!\Release\
+    ) else (
+        copy /y "!PROJECT_DIR!\vidcrypt-tiles.jar" "!BUILD_DIR!\" >nul
+        echo   [*] vidcrypt-tiles.jar copied to !BUILD_DIR!\
+    )
+)
+
 REM ── Done ──────────────────────────────────────────────────────────
 echo.
 echo ========================================
@@ -185,6 +264,10 @@ if "!USE_CUDA!"=="ON" (
 ) else (
     echo  Encode: !BUILD_DIR!\vidcrypt-encoder.exe -i input.zip -o encoded.mkv
     echo  Decode: !BUILD_DIR!\vidcrypt-decoder.exe -i encoded.mkv
+)
+if "!USE_JNI_TILES!"=="ON" (
+    echo  Java tiles: vidcrypt-tiles.jar ^(auto-loaded^)
+    echo  GPU+Java:   !BUILD_DIR!\vidcrypt-decoder.exe -b gpu -i video.mkv
 )
 echo  Tests:    cd !BUILD_DIR! ^&^& ctest -C Release --output-on-failure
 echo.

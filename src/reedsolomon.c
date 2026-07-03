@@ -7,6 +7,7 @@
 
 uint8_t gf_log[256];
 uint8_t gf_exp[512];
+uint8_t gf_mul_table[256][256];
 
 static bool tables_initialized = false;
 
@@ -26,6 +27,19 @@ void gf256_init(void) {
     gf_log[0] = 0;
     for (int i = 0; i < 255; ++i) {
         gf_exp[255 + i] = gf_exp[i];
+    }
+
+    /* Precompute 64KB GF(256) multiply table for fast table lookup */
+    for (int a = 0; a < 256; a++) {
+        gf_mul_table[0][a] = 0;
+        gf_mul_table[a][0] = 0;
+    }
+    for (int a = 1; a < 256; a++) {
+        int la = gf_log[a];
+        for (int b = 1; b < 256; b++) {
+            int sum = la + gf_log[b];
+            gf_mul_table[a][b] = gf_exp[sum >= 255 ? sum - 255 : sum];
+        }
     }
 }
 
@@ -261,3 +275,11 @@ void rs_decode_block(const RSCodec *codec, const uint8_t *received,
     memcpy(decoded, result.decoded, (size_t)codec->msg_length);
     if (status) *status = result.status;
 }
+
+#ifdef VIDCRYPT_VERIFY_GF
+uint8_t gf_mul_slow(uint8_t a, uint8_t b) {
+    if (a == 0 || b == 0) return 0;
+    int sum = (int)gf_log[a] + (int)gf_log[b];
+    return gf_exp[sum >= 255 ? sum - 255 : sum];
+}
+#endif

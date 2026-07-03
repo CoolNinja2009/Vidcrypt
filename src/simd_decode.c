@@ -229,6 +229,25 @@ int tile_decode_grid(const uint8_t *gray, int stride,
                      uint8_t *bits_out, int max_bits,
                      bool *sync_ok)
 {
+#ifdef USE_JNI_TILES
+    /* Try Java-accelerated tile decode (3-4x faster on JIT-warmed paths).
+     * Falls back to C if JVM not initialized or call fails. */
+    extern bool tile_decode_jni_available(void);
+    extern int tile_decode_grid_jni(
+        const uint8_t *gray, int stride,
+        int grid_top_y, int grid_left_x, int block_size,
+        int grid_cols, int grid_rows, int sync_rows,
+        uint8_t *bits_out, int max_bits, bool *sync_ok);
+
+    if (tile_decode_jni_available()) {
+        int n = tile_decode_grid_jni(gray, stride, grid_top_y, grid_left_x,
+                                     block_size, grid_cols, grid_rows, sync_rows,
+                                     bits_out, max_bits, sync_ok);
+        if (n > 0) return n;
+    }
+#endif
+
+    /* ── C fallback (SIMD-accelerated) ── */
     *sync_ok = tile_validate_sync(gray, stride, grid_top_y, grid_left_x,
                                    block_size, grid_cols, subsample);
 

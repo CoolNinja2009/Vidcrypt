@@ -12,14 +12,17 @@ extern "C" {
 /* GF(256) primitive polynomial: x^8 + x^4 + x^3 + x^2 + 1 (0x11D) */
 extern uint8_t gf_log[256];
 extern uint8_t gf_exp[512];
+extern uint8_t gf_mul_table[256][256];
 
 void gf256_init(void);
 
 static inline uint8_t gf_mul(uint8_t a, uint8_t b) {
-    if (a == 0 || b == 0) return 0;
-    int sum = (int)gf_log[a] + (int)gf_log[b];
-    return gf_exp[sum >= 255 ? sum - 255 : sum];
+    return gf_mul_table[a][b];
 }
+
+#ifdef VIDCRYPT_VERIFY_GF
+uint8_t gf_mul_slow(uint8_t a, uint8_t b);
+#endif
 
 static inline uint8_t gf_div(uint8_t a, uint8_t b) {
     if (a == 0) return 0;

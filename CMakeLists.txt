@@ -33,15 +33,21 @@ if(ENABLE_LOGGING)
     add_compile_definitions(ENABLE_LOGGING=1)
 endif()
 
-# If AVX2 is enabled, apply flags ONLY to simd_decode.c (not globally).
+# If AVX2 is enabled, apply flags ONLY to files with AVX2 paths (not globally).
 # Global /arch:AVX2 on MSVC forces VEX-prefixed instructions everywhere,
 # adding ~10% overhead to scalar code that doesn't benefit from SIMD.
 if(ENABLE_AVX2)
     if(MSVC)
-        set_source_files_properties(src/simd_decode.c PROPERTIES COMPILE_FLAGS "/arch:AVX2")
+        set_source_files_properties(
+            src/simd_decode.c
+            src/bitstream.c
+            PROPERTIES COMPILE_FLAGS "/arch:AVX2")
         # /arch:AVX2 on MSVC implies __AVX2__ automatically
     else()
-        set_source_files_properties(src/simd_decode.c PROPERTIES COMPILE_FLAGS "-mavx2 -D__AVX2__")
+        set_source_files_properties(
+            src/simd_decode.c
+            src/bitstream.c
+            PROPERTIES COMPILE_FLAGS "-mavx2 -D__AVX2__")
     endif()
 endif()
 
@@ -213,11 +219,74 @@ if(USE_CUDA)
     message(STATUS "  GPU sources: ${GPU_SOURCES}")
 endif()
 
+# ── Tile Decode Acceleration (3 tiers) ────────────────────────────────
+# Tier 1: USE_NATIVE_TILES — pre-built native lib (GraalVM, no runtime Java)
+# Tier 2: USE_JNI_TILES — JVM at runtime (JAR auto-loaded next to exe)
+# Tier 3: neither — C SIMD fallback (always works)
+
+option(USE_NATIVE_TILES "Link pre-built GraalVM native tile decoder (no runtime Java)" OFF)
+option(USE_JNI_TILES "Enable Java JNI-accelerated tile decoding (requires JVM at runtime)" OFF)
+
+if(USE_NATIVE_TILES)
+    # Pre-built native shared library from GraalVM native-image
+    # Built via: cd vidcrypt-java && native-image --shared -o vidcrypt_tiles ...
+    find_library(NATIVE_TILES_LIB vidcrypt_tiles
+        HINTS "${CMAKE_SOURCE_DIR}/vidcrypt-java" "${CMAKE_SOURCE_DIR}")
+    if(NATIVE_TILES_LIB)
+        target_sources(vidcrypt PRIVATE src/tile_decode_jni.c)
+        target_link_libraries(vidcrypt PRIVATE ${NATIVE_TILES_LIB})
+        target_compile_definitions(vidcrypt PRIVATE USE_NATIVE_TILES=1)
+        target_link_libraries(vidcrypt-decoder PRIVATE ${NATIVE_TILES_LIB})
+        message(STATUS "Native tile decoder: ${NATIVE_TILES_LIB}")
+    else()
+        message(WARNING "USE_NATIVE_TILES=ON but vidcrypt_tiles lib not found. Falling back.")
+        set(USE_NATIVE_TILES OFF)
+    endif()
+endif()
+
+if(USE_JNI_TILES AND NOT USE_NATIVE_TILES)
+    find_package(JNI REQUIRED)
+    include_directories(${JNI_INCLUDE_DIRS})
+    if(WIN32)
+        find_library(JVM_LIBRARY jvm HINTS "${JAVA_HOME}/lib" "${JAVA_HOME}/lib/server")
+    elseif(APPLE)
+        find_library(JVM_LIBRARY jvm HINTS "${JAVA_HOME}/lib/server" "${JAVA_HOME}/jre/lib/server")
+    else()
+        find_library(JVM_LIBRARY jvm HINTS "${JAVA_HOME}/lib/server" "${JAVA_HOME}/jre/lib/server")
+    endif()
+    if(NOT JVM_LIBRARY)
+        message(FATAL_ERROR "JVM library not found. Set JAVA_HOME or disable USE_JNI_TILES.")
+    endif()
+    target_sources(vidcrypt PRIVATE src/tile_decode_jni.c)
+    target_link_libraries(vidcrypt PRIVATE ${JVM_LIBRARY})
+    target_compile_definitions(vidcrypt PRIVATE USE_JNI_TILES=1)
+    message(STATUS "Java JNI tile decode enabled (JVM at runtime)")
+    message(STATUS "  JVM library: ${JVM_LIBRARY}")
+endif()
+
 add_executable(vidcrypt-encoder main_encoder.c)
 target_link_libraries(vidcrypt-encoder PRIVATE vidcrypt)
 
 add_executable(vidcrypt-decoder main_decoder.c)
 target_link_libraries(vidcrypt-decoder PRIVATE vidcrypt)
+
+# Link JVM or native tiles to decoder (after target is defined)
+if(USE_NATIVE_TILES)
+    target_link_libraries(vidcrypt-decoder PRIVATE ${NATIVE_TILES_LIB})
+endif()
+if(USE_JNI_TILES AND NOT USE_NATIVE_TILES)
+    target_link_libraries(vidcrypt-decoder PRIVATE ${JVM_LIBRARY})
+endif()
+
+# Copy JAR to output dir if it exists
+if(EXISTS "${CMAKE_SOURCE_DIR}/vidcrypt-tiles.jar")
+    add_custom_command(TARGET vidcrypt-decoder POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/vidcrypt-tiles.jar"
+            "$<TARGET_FILE_DIR:vidcrypt-decoder>/vidcrypt-tiles.jar"
+        COMMENT "Copying vidcrypt-tiles.jar to output dir"
+    )
+endif()
 
 enable_testing()
 

@@ -142,20 +142,37 @@ FFmpeg Reader → Decode Worker Pool → Reorder Buffer → RS Decode → File W
 - Ordered queue for frame reordering
 - Lock-free SPSC queues for single-producer/single-consumer paths
 
-## SIMD Architecture
+## Tile Decode Architecture
 
-Runtime CPU feature detection via cpuid (x86) or compile-time (ARM).
+Tile thresholding extracts bits from grayscale video frames. Each
+`block_size × block_size` cell is subsampled (4 sample points for
+block_size=8, offset=block_size/4, step=block_size/2). Majority vote
+(>2 out of 4) determines bit value.
 
-### Tile Thresholding:
-- SSE4.2: 128-bit (16 bytes/8 pixels at a time with subsampling)
-- AVX2: 256-bit (32 bytes/16 pixels)
-- AVX512: 512-bit (64 bytes/32 pixels)
-- NEON: 128-bit (16 bytes/8 pixels)
-- Scalar: byte-by-byte fallback
+### C SIMD Path (always available)
 
-### Operations accelerated:
-- Luma threshold comparison (>= 128)
-- White pixel counting
-- Majority vote
-- Bit packing/unpacking
-- Calibration extraction
+- `src/simd_decode.c` — runtime CPU feature detection via cpuid (x86)
+- **block_size=8**: `count_white_block8()` — branchless, fully unrolled, 4 loads
+- **block_size=16**: `count_white_block16()` — same pattern
+- **General**: `tile_count_white()` — early-majority-exit for non-standard sizes
+- **Calibration**: SSE2 (`_mm_sad_epu8`, 16 px/op) or AVX2 (`_mm256_sad_epu8`, 32 px/op)
+
+### Java JNI Path (USE_JNI_TILES=ON, 3-4x faster)
+
+- `src/tile_decode_jni.c` — loads JVM, calls `JniTileDecoder.tileDecodeGrid`
+- `vidcrypt-java/…/frame/TileDecoder.java` — same branchless algorithm
+- JIT inlines `countWhiteBlock8` through the inner loop, auto-vectorizes outer loops
+- Falls back to C SIMD transparently if JVM unavailable
+
+### Call chain (decode)
+
+```
+decoder_decode_file (decoder.c:214)
+  → libav_decoder / ffmpeg_pipe (frame read)
+    → tile_decode_grid (simd_decode.c:224)
+      [USE_JNI_TILES] → tile_decode_grid_jni (tile_decode_jni.c)
+        → JNI → JniTileDecoder.tileDecodeGrid (Java)
+          → TileDecoder.decodeGrid (Java)
+      [fallback] → tile_validate_sync + count_white_block8 (C SIMD)
+  → rs_decode (reedsolomon.c:217)
+```
