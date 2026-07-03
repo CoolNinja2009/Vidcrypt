@@ -46,16 +46,25 @@
 /* ──────────────────────────────────────────────────────────────────────
  * SIMD header inclusion
  *
- * SSE2 is guaranteed on x86-64.  AVX2 requires both compiler target
+ * SSE2 is guaranteed on x86-64. AVX2 requires both compiler target
  * support (#define __AVX2__) AND runtime CPU detection.
+ * On non-x86 architectures (ARM64/apple silicon), fall back to scalar.
  * ────────────────────────────────────────────────────────────────────── */
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
 #include <emmintrin.h>                  /* SSE2 — always available on x86-64 */
+#define HAS_X86_SIMD 1
+#else
+#define HAS_X86_SIMD 0
+#define HAS_AVX2 0
+#endif
 
+#if HAS_X86_SIMD
 #if defined(__AVX2__)
     #include <immintrin.h>              /* AVX2 — conditional on compiler flags */
     #define HAS_AVX2 1
 #else
     #define HAS_AVX2 0
+#endif
 #endif
 
 /* ──────────────────────────────────────────────────────────────────────
@@ -408,10 +417,59 @@ static int cal_read_avx2(const uint8_t *gray, int stride,
 }
 #endif /* HAS_AVX2 */
 
+#if !HAS_X86_SIMD
+/* ── Scalar calibration reader (non-x86 fallback: ARM64, etc.) ────── */
+static int cal_read_scalar(const uint8_t *gray, int stride,
+                            int width, int height,
+                            uint8_t *bits, int max_bits)
+{
+    int cal_top    = (int)((float)height * CAL_TOP_FRAC);
+    int cal_height = (int)((float)height * CAL_HEIGHT_FRAC);
+    int cal_left   = (int)((float)width  * CAL_LEFT_FRAC);
+    int cal_width  = (int)((float)width  * CAL_WIDTH_FRAC);
+
+    if (cal_height < CAL_ROWS || cal_width < CAL_COLS) return 0;
+
+    int cell_w    = cal_width  / CAL_COLS;
+    int cell_h    = cal_height / CAL_ROWS;
+    int sample_w  = (cell_w * 60) / 100;  if (sample_w < 2) sample_w = 2;
+    int sample_h  = (cell_h * 60) / 100;  if (sample_h < 2) sample_h = 2;
+
+    int count = 0;
+    for (int row = 0; row < CAL_ROWS && count < max_bits; ++row) {
+        for (int col = 0; col < CAL_COLS && count < max_bits; ++col) {
+            int cx = cal_left + col * cell_w + cell_w / 2;
+            int cy = cal_top  + row * cell_h + cell_h / 2;
+            int sx = cx - sample_w / 2;
+            int sy = cy - sample_h / 2;
+            if (sx < 0) sx = 0;
+            if (sy < 0) sy = 0;
+            int x_end = sx + sample_w;  if (x_end > width)  x_end = width;
+            int y_end = sy + sample_h;  if (y_end > height) y_end = height;
+
+            int row_bytes = x_end - sx;
+            if (row_bytes <= 0) return 0;
+
+            int total_sum = 0;
+            for (int yy = sy; yy < y_end; ++yy) {
+                const uint8_t *RESTRICT row_ptr = gray + (size_t)yy * stride + sx;
+                for (int xx = 0; xx < row_bytes; ++xx)
+                    total_sum += row_ptr[xx];
+            }
+
+            int samples = (y_end - sy) * row_bytes;
+            if (samples == 0) return 0;
+            bits[count++] = (uint8_t)((total_sum / samples) >= THRESHOLD ? 1 : 0);
+        }
+    }
+    return count;
+}
+#endif /* !HAS_X86_SIMD */
+
 /* ── Dispatch for tile_read_calibration ─────────────────────────────
- * SSE2 is always available on x86-64.  AVX2 is checked at init via CPUID
- * and selected if compiled in AND the CPU supports it.
- * ─────────────────────────────────────────────────────────────────────── */
+ * x86-64: SSE2 baseline, AVX2 if CPU supports it.
+ * Non-x86: pure scalar fallback.
+ * ─────────────────────────────────────────────────────────────────── */
 
 typedef int (*cal_read_fn)(const uint8_t *, int, int, int, uint8_t *, int);
 
@@ -422,14 +480,17 @@ static void cal_read_init_once(void) {
     if (cal_read_ready) return;
     cal_read_ready = 1;
 
+#if HAS_X86_SIMD
 #if HAS_AVX2
     if (_cpu_has_avx2()) {
         cal_read_impl = cal_read_avx2;
         return;
     }
 #endif
-    /* SSE2 is guaranteed on x86-64 */
     cal_read_impl = cal_read_sse2;
+#else
+    cal_read_impl = cal_read_scalar;
+#endif
 }
 
 /* ═══════════════════════════════════════════════════════════════════════

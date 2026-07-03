@@ -67,7 +67,7 @@ static void get_timestamp_ms(char *buf, int buf_size) {
     localtime_r(&tv.tv_sec, &tm);
     strftime(buf, (size_t)buf_size, "%H:%M:%S", &tm);
     int len = (int)strlen(buf);
-    _snprintf(buf + len, (size_t)(buf_size - len), ".%03d",
+    snprintf(buf + len, (size_t)(buf_size - len), ".%03d",
               (int)(tv.tv_usec / 1000));
 #endif
 }
@@ -95,7 +95,10 @@ static double memory_mb(void) {
     if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc)))
         return (double)pmc.WorkingSetSize / (1024.0 * 1024.0);
     return -1.0;
+#elif defined(__APPLE__)
+    return -1.0;  /* macOS: task_info requires non-trivial init; skip for now */
 #else
+    /* Linux: read /proc/self/statm */
     static long page_size = 0;
     if (page_size == 0) page_size = sysconf(_SC_PAGESIZE);
     FILE *f = fopen("/proc/self/statm", "r");

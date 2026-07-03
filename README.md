@@ -18,9 +18,9 @@ Instead of storing data in traditional containers, VIDCRYPT converts files into 
 * Multi-threaded encoding and decoding
 * **CUDA GPU acceleration** — 2378+ FPS decode (2.85× over CPU), with `h264_cuvid` hardware decode + CUDA tile extraction
 * **Direct libavcodec C API** — eliminates ffmpeg CLI pipe overhead for GPU path
-* **Async double-buffered pipeline** — CPU frame decode overlaps with GPU upload + kernel + copyback
-* High-speed CPU implementation (no GPU required)
-* SIMD-accelerated calibration reader (AVX2, SSE4.2)
+* **Async quad-buffered pipeline** — CPU frame decode overlaps with GPU upload + kernel + copyback
+* **Cross-platform** — Windows, macOS, Linux (ARM64 scalar fallback on Apple Silicon)
+* SIMD-accelerated calibration reader (AVX2, SSE4.2 on x86-64)
 
 ---
 
@@ -41,17 +41,16 @@ Measured on **Ryzen 7 7700X (8C/16T)** + **NVIDIA RTX 5070 (Blackwell)**, 100 MB
 
 | Codec | Encode | CPU Decode | GPU Decode | GPU Decoder | Output Size |
 |-------|--------|-----------|-----------|-------------|-------------|
-| **FFV1** (lossless) | 56s / 731 FPS | 54s / 757 FPS | **20s / 2032 FPS** | sw ffv1 + CUDA tiles | 839 MB |
+| **FFV1** (lossless) | 51s / 803 FPS | 53s / 771 FPS | **18s / 2297 FPS** | sw ffv1 + CUDA tiles | 839 MB |
 | **H.264** (CRF 10 ultrafast) | 80s / 513 FPS | 64s / 646 FPS | **36s / 1127 FPS** | **h264_cuvid (NVDEC)** | 2.4 GB |
 
-GPU decode achieves **2.7× speedup** (FFV1) to **3.2×** (H.264 NVDEC) over CPU by:
+GPU decode achieves **3.0× speedup** (FFV1) to **3.2×** (H.264 NVDEC) over CPU by:
 1. **Direct libavcodec C API** — eliminates ffmpeg CLI pipe overhead
-2. **Async double-buffering** — CPU frame decode overlaps with GPU upload + kernel + D2H copyback
+2. **Quad-buffered async pipeline** — 4 slots overlap CPU decode, GPU upload, kernel, D2H copyback
 3. **CUDA `extract_bits` kernel** — massively parallel tile thresholding (one thread per block)
 4. **NVDEC hardware decode** (H.264 only) — offloads video decode to dedicated GPU silicon
 
 **YouTube workflow:** Encode to H.264 yuv420p (required for NVDEC), upload, download the re-encoded MP4, GPU-decode with `-b gpu`. RS ECC corrects any compression artifacts.
-
 Actual performance depends on resolution, block size, codec settings, GPU model, and system hardware.
 
 ---
@@ -70,37 +69,68 @@ Actual performance depends on resolution, block size, codec settings, GPU model,
 
 ## Requirements
 
-* CMake 3.16+
-* C17-compatible compiler (GCC, Clang, MSVC)
-* FFmpeg + FFprobe (for CPU pipe path)
-* **For GPU acceleration:** NVIDIA GPU (Maxwell+) + CUDA Toolkit 12.x
-* **For NVDEC:** FFmpeg dev headers (BtbN shared build) in `ffmpeg_shared/`
-* **For NVENC:** NVIDIA Video Codec SDK (optional)
+| Component | Windows | macOS | Linux |
+|-----------|---------|-------|-------|
+| **Compiler** | MSVC or MinGW/GCC | Clang (Xcode CLT) | GCC or Clang |
+| **CMake** | 3.16+ | 3.16+ | 3.16+ |
+| **FFmpeg** | FFmpeg + FFprobe in PATH | FFmpeg + FFprobe in PATH | FFmpeg + FFprobe in PATH |
+| **CUDA GPU** | CUDA Toolkit 12.x + MSVC + Visual Studio | N/A | CUDA Toolkit 12.x + GCC |
+| **NVDEC** | BtbN FFmpeg shared build in `ffmpeg_shared/` | FFmpeg dev (pkg-config) | FFmpeg dev (pkg-config) |
+| **NVENC** | NVIDIA Video Codec SDK (optional) | N/A | NVIDIA Video Codec SDK (optional) |
 
 ---
 
 ## Build
 
-### CPU-only (any compiler)
+### Auto-detect (recommended)
 
+The build scripts auto-detect your platform, compiler, CUDA availability, and FFmpeg — then build with optimal settings.
+
+**Windows:**
+```batch
+cd builder
+build.bat                  :: auto-detect (CUDA if available, CPU fallback)
+build.bat --gpu            :: force CUDA build (fails if unavailable)
+build.bat --cpu --no-gpu   :: force CPU-only build
+```
+
+**macOS / Linux:**
+```bash
+cd builder
+./build.sh                 # auto-detect everything
+```
+
+### Manual CMake
+
+**Windows (CPU, any compiler):**
 ```bash
 mkdir build && cd build
 cmake ..
 cmake --build . --config Release
 ```
 
-### GPU-accelerated (requires MSVC + CUDA Toolkit)
-
-> **Windows CUDA builds require the MSVC toolchain.** MinGW/GCC cannot link CUDA objects.
-> Use the Visual Studio generator or open the generated `.sln` in Visual Studio.
-
+**Windows (GPU, requires MSVC + CUDA):**
 ```bash
-mkdir build && cd build
+mkdir build_cuda && cd build_cuda
 cmake .. -G "Visual Studio 17 2022" -A x64 -DUSE_CUDA=ON
 cmake --build . --config Release
 ```
 
-### Advanced options
+**macOS / Linux (CPU):**
+```bash
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+cmake --build . --parallel
+```
+
+**Linux (GPU):**
+```bash
+mkdir build_cuda && cd build_cuda
+cmake .. -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=ON
+cmake --build . --parallel
+```
+
+### CMake Options
 
 | Option | Default | Description |
 | ------ | ------- | ----------- |
@@ -197,7 +227,7 @@ The decoder automatically restores the original filename and verifies the recove
 
 VIDCRYPT-V8 is an active experimental project focused on maximizing recovery reliability from heavily compressed video while maintaining extremely high throughput.
 
-GPU acceleration is currently implemented for the **decode path only** (2378+ FPS on RTX 5070). GPU encode path with NVENC is under development.
+**Platforms:** Windows (x86-64 + CUDA), macOS (ARM64/x86-64), Linux (x86-64 + CUDA). ARM64 uses a scalar fallback for calibration with full functionality. GPU acceleration is implemented for the **decode path** (2378+ FPS on RTX 5070). GPU encode path with NVENC is under development.
 
 ---
 

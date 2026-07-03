@@ -84,9 +84,22 @@ if(USE_CUDA)
     enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
 
-    # Target architectures: SASS for modern GPUs + PTX for backward compat
-    # RTX 5070 = sm_120 (Blackwell consumer). CUDA 12.6 supports up to sm_90,
-    # so we include sm_90 PTX for driver JIT-compilation on Blackwell.
+    # Target architectures: SASS for all consumer GPU generations,
+    # PTX virtual arch for forward compatibility on newer CUDA versions.
+    # Override with: -DVIDCRYPT_CUDA_ARCHS="61;75;86;89;120"
+    if(NOT DEFINED VIDCRYPT_CUDA_ARCHS)
+        if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.8")
+            set(VIDCRYPT_CUDA_ARCHS "61;75;86;89;120"
+                CACHE STRING "CUDA target architectures: 61=Pascal 75=Turing 86=Ampere 89=Ada 120=Blackwell")
+        elseif(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "11.8")
+            set(VIDCRYPT_CUDA_ARCHS "61;75;86;89;90-virtual"
+                CACHE STRING "CUDA target architectures (90-virtual=PTX for Blackwell JIT)")
+        else()
+            set(VIDCRYPT_CUDA_ARCHS "61;75;86;90-virtual"
+                CACHE STRING "CUDA target architectures")
+        endif()
+    endif()
+    message(STATUS "CUDA architectures: ${VIDCRYPT_CUDA_ARCHS}")
     set(GPU_SOURCES
         src/gpu_kernels.cu
         src/gpu_presets.c
@@ -131,38 +144,68 @@ if(USE_CUDA)
     target_include_directories(vidcrypt PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
     target_link_libraries(vidcrypt PRIVATE CUDA::cudart CUDA::cuda_driver)
 
-    # ── FFmpeg (NVDEC) ────────────────────────────────────────────────
-    # BtbN FFmpeg LGPL shared build with CUDA hwaccel support.
-    # Provides libavformat, libavcodec, libavutil for NVDEC zero-copy.
-    set(FFMPEG_DIR "C:/Users/cooln/Documents/ffmpeg-master-latest-win64-lgpl-shared")
-    if(EXISTS "${FFMPEG_DIR}/include/libavformat/avformat.h")
-        target_include_directories(vidcrypt PRIVATE "${FFMPEG_DIR}/include")
-        target_link_directories(vidcrypt PRIVATE "${FFMPEG_DIR}/lib")
-        target_link_libraries(vidcrypt PRIVATE
-            "${FFMPEG_DIR}/lib/avformat.lib"
-            "${FFMPEG_DIR}/lib/avcodec.lib"
-            "${FFMPEG_DIR}/lib/avutil.lib"
-            "${FFMPEG_DIR}/lib/swscale.lib"
-        )
-        target_compile_definitions(vidcrypt PRIVATE HAS_FFMPEG=1)
-        message(STATUS "FFmpeg NVDEC found at ${FFMPEG_DIR}")
-        message(STATUS "  libavformat: ${FFMPEG_DIR}/lib/avformat.lib")
-        message(STATUS "  libavcodec:  ${FFMPEG_DIR}/lib/avcodec.lib")
-        message(STATUS "  CUDA hwaccel: enabled (BtbN shared build)")
 
-        # Save FFMPEG_DIR and DLL list for post-build copy (after executables are created)
-        set(FFMPEG_DLLS
-            "${FFMPEG_DIR}/bin/avformat-62.dll"
-            "${FFMPEG_DIR}/bin/avcodec-62.dll"
-            "${FFMPEG_DIR}/bin/avutil-60.dll"
-            "${FFMPEG_DIR}/bin/swscale-9.dll"
-            "${FFMPEG_DIR}/bin/swresample-6.dll"
-            CACHE INTERNAL "FFmpeg DLLs for NVDEC runtime"
-        )
+    # ── FFmpeg (NVDEC / libavcodec) ───────────────────────────────────
+    # On Windows: use BtbN shared build with .lib files
+    # On macOS/Linux: use system FFmpeg via pkg-config or manual find
+    if(WIN32)
+        set(FFMPEG_DIR "C:/Users/cooln/Documents/ffmpeg-master-latest-win64-lgpl-shared"
+            CACHE PATH "Path to BtbN FFmpeg shared build root")
+        if(EXISTS "${FFMPEG_DIR}/include/libavformat/avformat.h")
+            target_include_directories(vidcrypt PRIVATE "${FFMPEG_DIR}/include")
+            target_link_directories(vidcrypt PRIVATE "${FFMPEG_DIR}/lib")
+            target_link_libraries(vidcrypt PRIVATE
+                "${FFMPEG_DIR}/lib/avformat.lib"
+                "${FFMPEG_DIR}/lib/avcodec.lib"
+                "${FFMPEG_DIR}/lib/avutil.lib"
+                "${FFMPEG_DIR}/lib/swscale.lib"
+            )
+            target_compile_definitions(vidcrypt PRIVATE HAS_FFMPEG=1)
+            message(STATUS "FFmpeg NVDEC found at ${FFMPEG_DIR}")
+
+            set(FFMPEG_DLLS
+                "${FFMPEG_DIR}/bin/avformat-62.dll"
+                "${FFMPEG_DIR}/bin/avcodec-62.dll"
+                "${FFMPEG_DIR}/bin/avutil-60.dll"
+                "${FFMPEG_DIR}/bin/swscale-9.dll"
+                "${FFMPEG_DIR}/bin/swresample-6.dll"
+                CACHE INTERNAL "FFmpeg DLLs for NVDEC runtime"
+            )
+        else()
+            message(WARNING "FFmpeg dev headers not found at ${FFMPEG_DIR}")
+            message(WARNING "  NVDEC zero-copy decode disabled")
+        endif()
     else()
-        message(WARNING "FFmpeg dev headers not found at ${FFMPEG_DIR}")
-        message(WARNING "  NVDEC zero-copy decode disabled")
-        message(WARNING "  Download BtbN FFmpeg shared build to ffmpeg_shared/ to enable")
+        # macOS / Linux: use pkg-config or find_library
+        find_package(PkgConfig QUIET)
+        if(PkgConfig_FOUND)
+            pkg_check_modules(FFMPEG QUIET
+                libavformat libavcodec libavutil libswscale)
+        endif()
+        if(FFMPEG_FOUND)
+            target_include_directories(vidcrypt PRIVATE ${FFMPEG_INCLUDE_DIRS})
+            target_link_directories(vidcrypt PRIVATE ${FFMPEG_LIBRARY_DIRS})
+            target_link_libraries(vidcrypt PRIVATE ${FFMPEG_LIBRARIES})
+            target_compile_definitions(vidcrypt PRIVATE HAS_FFMPEG=1)
+            message(STATUS "FFmpeg found via pkg-config")
+        else()
+            # Try find_library fallback
+            find_path(AVFORMAT_INCLUDE_DIR libavformat/avformat.h)
+            find_library(AVFORMAT_LIB avformat)
+            find_library(AVCODEC_LIB avcodec)
+            find_library(AVUTIL_LIB avutil)
+            find_library(SWSCALE_LIB swscale)
+            if(AVFORMAT_INCLUDE_DIR AND AVFORMAT_LIB AND AVCODEC_LIB AND AVUTIL_LIB)
+                target_include_directories(vidcrypt PRIVATE ${AVFORMAT_INCLUDE_DIR})
+                target_link_libraries(vidcrypt PRIVATE
+                    ${AVFORMAT_LIB} ${AVCODEC_LIB} ${AVUTIL_LIB} ${SWSCALE_LIB})
+                target_compile_definitions(vidcrypt PRIVATE HAS_FFMPEG=1)
+                message(STATUS "FFmpeg found via find_library")
+            else()
+                message(WARNING "FFmpeg dev libraries not found — NVDEC disabled")
+                message(WARNING "  Install ffmpeg dev package (e.g. 'brew install ffmpeg' or 'apt install libavformat-dev')")
+            endif()
+        endif()
     endif()
 
     message(STATUS "CUDA GPU acceleration enabled")
@@ -197,8 +240,8 @@ add_test(NAME test-reedsolomon COMMAND test-reedsolomon)
 
 # ── FFmpeg DLL copy for runtime NVDEC ───────────────────────────────
 # Copy BtbN FFmpeg DLLs to each executable's output directory so
-# Windows can find them at runtime (searches: exe dir, CWD, PATH).
-if(USE_CUDA AND DEFINED FFMPEG_DLLS)
+# Windows-only: copy FFmpeg DLLs alongside executables for NVDEC runtime
+if(WIN32 AND USE_CUDA AND DEFINED FFMPEG_DLLS)
     foreach(TGT vidcrypt-decoder vidcrypt-encoder)
         add_custom_command(TARGET ${TGT} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different

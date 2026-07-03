@@ -647,20 +647,22 @@ bool decoder_decode_file(const char *input_path, const DecoderConfig *config,
         return false;
     }
 
-    /* ─── Async GPU decode slots (double-buffered) ────────────────── */
-    GpuDecodeSlot gpu_slots[2];
+    /* ─── Async GPU decode slots (quad-buffered) ────────────────────
+     * 4 slots for deeper pipelining:
+     *   Slot 0: CPU decode frame N+3 → GPU process N+2 → D2H N+1 → RS N */
+    GpuDecodeSlot gpu_slots[4];
     memset(gpu_slots, 0, sizeof(gpu_slots));
     if (use_gpu) {
-        if (!gpu_slot_init(&gpu_slots[0], vw, vh, pay_bits) ||
-            !gpu_slot_init(&gpu_slots[1], vw, vh, pay_bits)) {
-            gpu_slot_destroy(&gpu_slots[0]);
-            gpu_slot_destroy(&gpu_slots[1]);
-            threadpool_destroy(pool); fclose(out); free(bit_buffer);
-            free(header_bits); free(decoded_buf); free(first_frame_cpu);
-            if (gpu_backend) gpu_backend_destroy(gpu_backend);
-            if (lav_dec) libav_decoder_close(lav_dec);
-            snprintf(error_msg, (size_t)error_msg_size, "Out of GPU memory");
-            return false;
+        for (int i = 0; i < 4; ++i) {
+            if (!gpu_slot_init(&gpu_slots[i], vw, vh, pay_bits)) {
+                for (int j = 0; j < i; ++j) gpu_slot_destroy(&gpu_slots[j]);
+                threadpool_destroy(pool); fclose(out); free(bit_buffer);
+                free(header_bits); free(decoded_buf); free(first_frame_cpu);
+                if (gpu_backend) gpu_backend_destroy(gpu_backend);
+                if (lav_dec) libav_decoder_close(lav_dec);
+                snprintf(error_msg, (size_t)error_msg_size, "Out of GPU memory");
+                return false;
+            }
         }
     }
 
@@ -711,67 +713,46 @@ bool decoder_decode_file(const char *input_path, const DecoderConfig *config,
     } \
 } while(0)
 
-    /* ─── Frame decode loop ──────────────────────────────────────────
-     * GPU path: async double-buffered pipeline
-     *   Slot A: GPU upload + extract_bits kernel + D2H copyback
-     *   Slot B: CPU libavcodec decode of next frame
-     *   CPU RS decode + file write processes previous slot's bits
-     *
-     * CPU path: batch frames → threadpool → RS decode + file write */
+    /* ─── Quad-buffered GPU pipeline ────────────────────────────────
+     * 4 slots overlap: CPU decode, GPU upload, GPU kernel, RS decode.
+     * Prime 3 slots then enter the loop. */
     if (use_gpu) {
-        /* ── Prime: decode first frame and submit to slot 0 ───────── */
-        int current_slot = 0;
+        int slot = 0;
         uint8_t *gray_ptr = NULL;
         int gray_p = 0, fw = 0, fh = 0;
-        bool more_frames;
-
-        more_frames = libav_decoder_read_frame(lav_dec, &gray_ptr, &gray_p, &fw, &fh);
-        if (more_frames) {
-            gpu_slot_submit(&gpu_slots[current_slot], gray_ptr, gray_p,
-                            fw, fh, &geom, pay_bits,
-                            gpu_backend);
-        }
-        current_slot = 1 - current_slot;
-
-        /* ── Async pipeline loop ─────────────────────────────────── */
-        while (more_frames) {
-            /* Decode the NEXT frame on CPU (overlaps with GPU) */
-            more_frames = libav_decoder_read_frame(lav_dec, &gray_ptr, &gray_p,
-                                                    &fw, &fh);
-
-            /* Submit current frame to GPU (if any) */
-            if (more_frames) {
-                gpu_slot_submit(&gpu_slots[current_slot], gray_ptr, gray_p,
-                                fw, fh, &geom, pay_bits,
-                                gpu_backend);
-            }
-
-            /* Wait for the PREVIOUS slot's bits (GPU processing finished
-             * while CPU was decoding the next frame) */
-            int prev_slot = 1 - current_slot;
-            uint8_t *h_bits = gpu_slot_wait(&gpu_slots[prev_slot]);
-
-            /* RS decode + file write on CPU */
-            if (h_bits)
-                PROCESS_BITS(h_bits, pay_bits);
-
-            current_slot = 1 - current_slot;
-        }
-
-        /* ── Drain: wait for remaining slots ─────────────────────── */
-        for (int i = 0; i < 2; ++i) {
-            int slot = (current_slot + i) % 2;
-            if (gpu_slots[slot].valid) {
-                uint8_t *h_bits = gpu_slot_wait(&gpu_slots[slot]);
-                if (h_bits)
-                    PROCESS_BITS(h_bits, pay_bits);
+        bool more = true;
+        for (int i = 0; i < 3 && more; ++i) {
+            more = libav_decoder_read_frame(lav_dec, &gray_ptr, &gray_p, &fw, &fh);
+            if (more) {
+                gpu_slot_submit(&gpu_slots[i], gray_ptr, gray_p, fw, fh,
+                                &geom, pay_bits, gpu_backend);
+                slot = (i + 1) % 4;
             }
         }
-
+        while (more) {
+            /* Decode next frame, overlapping with GPU work */
+            more = libav_decoder_read_frame(lav_dec, &gray_ptr, &gray_p, &fw, &fh);
+            /* Collect completed slot (3 slots behind current) */
+            int done_slot = (slot + 1) % 4;
+            if (gpu_slots[done_slot].valid) {
+                uint8_t *h_bits = gpu_slot_wait(&gpu_slots[done_slot]);
+                if (h_bits) PROCESS_BITS(h_bits, pay_bits);
+            }
+            if (more) {
+                gpu_slot_submit(&gpu_slots[slot], gray_ptr, gray_p, fw, fh,
+                                &geom, pay_bits, gpu_backend);
+                slot = (slot + 1) % 4;
+            }
+        }
+        /* Drain remaining 3 slots */
+        for (int i = 0; i < 4; ++i) {
+            int s = (slot + 1 + i) % 4;
+            if (gpu_slots[s].valid) {
+                uint8_t *h_bits = gpu_slot_wait(&gpu_slots[s]);
+                if (h_bits) PROCESS_BITS(h_bits, pay_bits);
+            }
+        }
 #ifdef USE_CUDA
-        /* Sync GPU stream to ensure all work complete.
-         * Uses backend's internal decode stream which is shared by
-         * upload, kernel, and copyback operations. */
         cudaStreamSynchronize((cudaStream_t)gpu_backend_get_decode_stream(gpu_backend));
 #endif
     } else {
@@ -861,8 +842,7 @@ bool decoder_decode_file(const char *input_path, const DecoderConfig *config,
 #ifdef USE_CUDA
     /* gpu_decode_stream is owned by gpu_backend, destroyed in gpu_backend_destroy */
 #endif
-    gpu_slot_destroy(&gpu_slots[0]);
-    gpu_slot_destroy(&gpu_slots[1]);
+    for (int i = 0; i < 4; ++i) gpu_slot_destroy(&gpu_slots[i]);
 
     double end_time = (double)clock() / CLOCKS_PER_SEC;
     result->elapsed_sec = end_time - start_time;

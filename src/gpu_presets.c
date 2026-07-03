@@ -53,11 +53,23 @@ static const GpuPreset PRESET_TURING = {
 
 static const GpuPreset PRESET_AMPERE = {
     .compute_capability_major = 8, .compute_capability_minor = 0,
-    .architecture_name = "Ampere",
+    .architecture_name = "Ampere (A100)",
     .decode_block_x = 32, .decode_block_y = 16,
     .decode_smem_bytes = 24576,
-    .num_cuda_streams = 4, .num_nvdec_surfaces = 12,
+    .num_cuda_streams = 4, .num_nvdec_surfaces = 0,
     .batch_frames_per_launch = 24,
+    .has_nvdec = false, .has_nvenc = false,
+    .has_av1_encode = false, .has_async_copy = true,
+    .max_width = 7680, .max_height = 4320,
+};
+
+static const GpuPreset PRESET_AMPERE_CONSUMER = {
+    .compute_capability_major = 8, .compute_capability_minor = 6,
+    .architecture_name = "Ampere (RTX 30)",
+    .decode_block_x = 32, .decode_block_y = 16,
+    .decode_smem_bytes = 32768,
+    .num_cuda_streams = 6, .num_nvdec_surfaces = 12,
+    .batch_frames_per_launch = 32,
     .has_nvdec = true, .has_nvenc = true,
     .has_av1_encode = false, .has_async_copy = true,
     .max_width = 7680, .max_height = 4320,
@@ -65,7 +77,7 @@ static const GpuPreset PRESET_AMPERE = {
 
 static const GpuPreset PRESET_ADA = {
     .compute_capability_major = 8, .compute_capability_minor = 9,
-    .architecture_name = "Ada Lovelace",
+    .architecture_name = "Ada Lovelace (RTX 40)",
     .decode_block_x = 32, .decode_block_y = 16,
     .decode_smem_bytes = 32768,
     .num_cuda_streams = 6, .num_nvdec_surfaces = 12,
@@ -118,6 +130,7 @@ const GpuPreset* gpu_preset_lookup(int major, int minor) {
     if (cc >= 1000) return &PRESET_BLACKWELL_DC;
     if (cc >= 900)  return &PRESET_HOPPER;
     if (cc >= 890)  return &PRESET_ADA;
+    if (cc >= 860)  return &PRESET_AMPERE_CONSUMER;
     if (cc >= 800)  return &PRESET_AMPERE;
     if (cc >= 750)  return &PRESET_TURING;
     if (cc >= 700)  return &PRESET_VOLTA;

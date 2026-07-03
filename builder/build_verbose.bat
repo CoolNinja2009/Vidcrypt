@@ -1,46 +1,42 @@
 @echo off
 setlocal enabledelayedexpansion
+
+cd /d "%~dp0.."
+set "PROJECT_DIR=%CD%"
+
 echo ========================================
-echo  VIDCRYPT-V8 Build Script - Verbose
-echo  (Profiling + Logging + AVX2)
+echo  VIDCRYPT-V8  --  Verbose Build
+echo  ^(Profiling + Logging + AVX2^)
 echo ========================================
 echo.
 
- if not exist build_verbose (
-     echo [*] Creating build_verbose directory...
-     mkdir build_verbose
- )
+set "BUILD_DIR=%PROJECT_DIR%\build_verbose"
+if not exist "!BUILD_DIR!" mkdir "!BUILD_DIR!"
+cd /d "!BUILD_DIR!"
 
- cd build_verbose
-
- echo [*] Configuring CMake (profiling, logging, AVX2)...
- cmake .. -DENABLE_PROFILING=ON -DENABLE_LOGGING=ON -DENABLE_AVX2=ON
+echo [*] Configuring CMake ^(profiling, logging, AVX2^)...
+cmake "!PROJECT_DIR!" -DENABLE_PROFILING=ON -DENABLE_LOGGING=ON -DENABLE_AVX2=ON
 if errorlevel 1 (
-    echo.
     echo [FAIL] CMake configuration failed.
-    pause
-    exit /b 1
+    pause & exit /b 1
 )
 
 echo.
-echo [*] Building Release with verbose output...
-cmake --build . --config Release --verbose
+echo [*] Building Release ^(%NUMBER_OF_PROCESSORS% parallel^)...
+cmake --build . --config Release --parallel %NUMBER_OF_PROCESSORS%
 if errorlevel 1 (
-    echo.
     echo [FAIL] Build failed.
-    pause
-    exit /b 1
+    pause & exit /b 1
 )
 
 echo.
 echo ========================================
-echo  Verbose build completed successfully!
-echo  Output: build_verbose\Release\
+echo  Verbose build complete!
+echo  Output: !BUILD_DIR!\Release\
 echo ========================================
 echo.
-echo  Note: Profiling is enabled.
-echo  Run decoder with profiling:
-echo    vidcrypt-decoder -i video.mkv  (prints stage timings)
+echo  Profiling + logging enabled.
+echo  Run:  vidcrypt-decoder -i video.mkv
 echo.
 
 pause
