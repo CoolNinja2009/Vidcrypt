@@ -11,13 +11,13 @@ echo.
 REM ── Parse command-line flags ─────────────────────────────────────
 set "FORCE_CPU="
 set "FORCE_GPU="
+set "FORCE_NO_JAVA="
 :parse_args
 if "%~1"=="" goto :args_done
 if /i "%~1"=="--cpu"     set "FORCE_CPU=1"
 if /i "%~1"=="--no-gpu"  set "FORCE_CPU=1"
 if /i "%~1"=="--gpu"     set "FORCE_GPU=1"
 if /i "%~1"=="--cuda"    set "FORCE_GPU=1"
-
 if /i "%~1"=="--no-java" set "FORCE_NO_JAVA=1"
 shift
 goto :parse_args
@@ -47,45 +47,6 @@ if not defined HAS_CC (
     pause & exit /b 1
 )
 echo   [+] Compiler: !CC_LABEL!
-
-REM ── Java detection (for JNI tile decoder) ───────────────────────
-set "USE_JNI_TILES=OFF"
-set "HAS_JAVA="
-set "JAVA_HOME_DETECTED="
-
-if defined FORCE_NO_JAVA (
-    echo   [*] --no-java flag set — skipping Java tile decoder
-    goto :java_done
-)
-
-REM Try JAVA_HOME first, then PATH
-if defined JAVA_HOME (
-    if exist "!JAVA_HOME!\bin\javac.exe" (
-        set "HAS_JAVA=1"
-        set "JAVA_HOME_DETECTED=!JAVA_HOME!"
-        echo   [+] Java: !JAVA_HOME!
-    )
-)
-if not defined HAS_JAVA (
-    where javac >nul 2>nul
-    if not errorlevel 1 (
-        for /f "tokens=*" %%i in ('javac --version 2^>^&1') do echo   [+] Java: %%i
-        set "HAS_JAVA=1"
-        REM Extract JAVA_HOME from javac path
-        for /f "tokens=*" %%i in ('where javac') do set "JAVAC_PATH=%%i"
-        if defined JAVAC_PATH (
-            for %%A in ("!JAVAC_PATH!") do set "JAVA_HOME_DETECTED=%%~dpA.."
-            set "JAVA_HOME_DETECTED=!JAVA_HOME_DETECTED:\bin\=!"
-        )
-    )
-)
-
-if defined HAS_JAVA (
-    set "USE_JNI_TILES=ON"
-) else (
-    echo   [*] Java not found — JNI tile decoder disabled
-)
-:java_done
 
 REM ── CPU info ──────────────────────────────────────────────────────
 set "NPROC=4"
@@ -122,26 +83,26 @@ if not errorlevel 1 (
             echo   [+] VS generator: !VS_GEN!
         ) else (
             if defined FORCE_GPU (
-                echo   [FAIL] --gpu flag set but no usable VS generator found
+                echo [FAIL] --gpu flag set but no usable VS generator found
                 echo          Run from a Visual Studio Developer Command Prompt.
-                pause ^& exit /b 1
+                pause & exit /b 1
             )
             echo   [!!] nvcc + MSVC found, but no usable VS generator in this shell
             echo   [!!] Falling back to CPU-only build
         )
     ) else (
         if defined FORCE_GPU (
-            echo   [FAIL] --gpu flag set but no MSVC compiler found
-            pause ^& exit /b 1
+            echo [FAIL] --gpu flag set but no MSVC compiler found
+            pause & exit /b 1
         )
         echo   [!!] nvcc found but no MSVC compiler
         echo   [!!] Falling back to CPU-only build
     )
 ) else (
     if defined FORCE_GPU (
-        echo   [FAIL] --gpu flag set but nvcc not found
+        echo [FAIL] --gpu flag set but nvcc not found
         echo          Install CUDA Toolkit 12.x
-        pause ^& exit /b 1
+        pause & exit /b 1
     )
     echo   [*] nvcc not found -- CPU-only build
 )
@@ -164,18 +125,91 @@ if "!USE_CUDA!"=="ON" (
 
 echo.
 
+REM ── Java detection (for JNI tile decoder) ───────────────────────────
+set "USE_JNI_TILES=OFF"
+set "JAVA_HOME_DETECTED="
+
+if defined FORCE_NO_JAVA (
+    echo   [*] --no-java flag set — skipping Java tile decoder
+    goto :java_done
+)
+
+REM Strategy 1: Check JAVA_HOME environment variable
+if defined JAVA_HOME (
+    if exist "!JAVA_HOME!\bin\javac.exe" (
+        set "HAS_JAVA=1"
+        set "JAVA_HOME_DETECTED=!JAVA_HOME!"
+        echo   [+] Java: found via JAVA_HOME env
+        goto :java_found
+    )
+)
+
+REM Strategy 2: Look in C:\Program Files\Java\ for installed JDKs
+if exist "C:\Program Files\Java\" (
+    set "BEST_JDK="
+    for /d %%d in ("C:\Program Files\Java\jdk*") do (
+        if exist "%%d\bin\javac.exe" (
+            set "BEST_JDK=%%d"
+        )
+    )
+    if defined BEST_JDK (
+        set "JAVA_HOME_DETECTED=!BEST_JDK!"
+        set "HAS_JAVA=1"
+        echo   [+] Java: found JDK at !BEST_JDK!
+        goto :java_found
+    )
+)
+
+REM Strategy 3: Try deriving from javac on PATH
+where javac >nul 2>nul
+if not errorlevel 1 (
+    for /f "tokens=*" %%i in ('javac --version 2^>^&1') do echo   [+] Java: %%i
+
+    REM Try to find real JDK by walking up from the javac path
+    for /f "tokens=*" %%i in ('where javac') do set "JAVAC_PATH=%%i"
+    if defined JAVAC_PATH (
+        REM javapath is a shim — try the real JDK in Program Files\Java
+        if exist "C:\Program Files\Java\" (
+            set "BEST_JDK="
+            for /d %%d in ("C:\Program Files\Java\jdk*") do (
+                if exist "%%d\bin\javac.exe" (
+                    set "BEST_JDK=%%d"
+                )
+            )
+            if defined BEST_JDK (
+                set "JAVA_HOME_DETECTED=!BEST_JDK!"
+                set "HAS_JAVA=1"
+                goto :java_found
+            )
+        )
+    )
+)
+
+if defined HAS_JAVA (
+    set "USE_JNI_TILES=ON"
+) else (
+    echo   [*] Java not found — JNI tile decoder disabled
+)
+goto :java_done
+
+:java_found
+set "USE_JNI_TILES=ON"
+for /f "tokens=*" %%i in ('"!JAVA_HOME_DETECTED!\bin\javac" --version 2^>^&1') do echo   [+] Java: %%i
+
+:java_done
+
 REM ── Summary ───────────────────────────────────────────────────────
+echo.
 echo ── Build plan ──
 echo   Type:      !BUILD_LABEL!
 echo   Directory: !BUILD_DIR!
 if "!USE_CUDA!"=="ON" echo   Generator: !VS_GEN! -A x64
-echo   Flags:     USE_CUDA=!USE_CUDA!  ENABLE_AVX2=ON
+echo   Flags:     USE_CUDA=!USE_CUDA!  ENABLE_AVX2=ON  USE_JNI_TILES=!USE_JNI_TILES!
 echo   Parallel:  !NPROC! jobs
 echo.
 
 REM ── Compile Java tile decoder ────────────────────────────────────
 if "!USE_JNI_TILES!"=="ON" (
-    echo.
     echo [*] Compiling Java tile decoder...
 
     set "JAVA_SRC=!PROJECT_DIR!\vidcrypt-java\vidcrypt-core\src\main\java\com\vidcrypt"
@@ -184,17 +218,21 @@ if "!USE_JNI_TILES!"=="ON" (
     if exist "!JAVA_OUT!" rmdir /s /q "!JAVA_OUT!"
     mkdir "!JAVA_OUT!"
 
-    "!JAVA_HOME_DETECTED!\bin\javac" --enable-preview --release 21 -d "!JAVA_OUT!" --add-modules jdk.incubator.vector "!JAVA_SRC!\frame\JniTileDecoder.java" "!JAVA_SRC!\frame\TileDecoder.java" "!JAVA_SRC!\frame\DecodeGeometry.java" "!JAVA_SRC!\calibration\CalParams.java" "!JAVA_SRC!\hash\Crc16.java"
+    "!JAVA_HOME_DETECTED!\bin\javac" --enable-preview --release 21 -d "!JAVA_OUT!" --add-modules jdk.incubator.vector ^
+        "!JAVA_SRC!\frame\JniTileDecoder.java" ^
+        "!JAVA_SRC!\frame\TileDecoder.java" ^
+        "!JAVA_SRC!\frame\DecodeGeometry.java" ^
+        "!JAVA_SRC!\calibration\CalParams.java" ^
+        "!JAVA_SRC!\hash\Crc16.java"
     if errorlevel 1 (
         echo [FAIL] Java compilation failed
-        pause ^& exit /b 1
+        pause & exit /b 1
     )
 
-    REM Create JAR
     "!JAVA_HOME_DETECTED!\bin\jar" cf "!PROJECT_DIR!\vidcrypt-tiles.jar" -C "!JAVA_OUT!" .
     if errorlevel 1 (
         echo [FAIL] JAR creation failed
-        pause ^& exit /b 1
+        pause & exit /b 1
     )
 
     echo   [+] vidcrypt-tiles.jar created
@@ -210,12 +248,22 @@ if exist CMakeCache.txt (
     rmdir /s /q CMakeFiles >nul 2>&1
 )
 
+REM ── Convert JAVA_HOME to forward slashes for CMake ─────────────────
+set "CMAKE_JAVA_HOME=!JAVA_HOME_DETECTED!"
+if defined CMAKE_JAVA_HOME (
+    set "CMAKE_JAVA_HOME=!CMAKE_JAVA_HOME:\=/!"
+)
+
 REM ── Configure CMake ───────────────────────────────────────────────
 echo [*] Configuring CMake...
 if "!USE_CUDA!"=="ON" (
-    cmake "!PROJECT_DIR!" -G "!VS_GEN!" -A x64 -DUSE_CUDA=ON -DENABLE_AVX2=ON -DUSE_JNI_TILES=!USE_JNI_TILES! -DJAVA_HOME="!JAVA_HOME_DETECTED!"
+    cmake "!PROJECT_DIR!" -G "!VS_GEN!" -A x64 ^
+        -DUSE_CUDA=ON -DENABLE_AVX2=ON -DUSE_JNI_TILES=!USE_JNI_TILES! ^
+        -DJAVA_HOME="!CMAKE_JAVA_HOME!"
 ) else (
-    cmake "!PROJECT_DIR!" -DUSE_CUDA=OFF -DENABLE_AVX2=ON -DUSE_JNI_TILES=!USE_JNI_TILES! -DJAVA_HOME="!JAVA_HOME_DETECTED!"
+    cmake "!PROJECT_DIR!" ^
+        -DUSE_CUDA=OFF -DENABLE_AVX2=ON -DUSE_JNI_TILES=!USE_JNI_TILES! ^
+        -DJAVA_HOME="!CMAKE_JAVA_HOME!"
 )
 if errorlevel 1 (
     echo.
@@ -281,7 +329,6 @@ REM Sets VS_GEN if the generator works.
 REM ═══════════════════════════════════════════════════════════════════
 :probe_vs
 set "TEST_GEN=%~1"
-REM Try a minimal configure in a temp dir to test the generator
 set "TMP_PROBE=%TEMP%\vidcrypt_vs_probe"
 if exist "%TMP_PROBE%" rmdir /s /q "%TMP_PROBE%" >nul 2>&1
 mkdir "%TMP_PROBE%" >nul 2>&1
