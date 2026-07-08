@@ -245,6 +245,12 @@ if(USE_NATIVE_TILES)
 endif()
 
 if(USE_JNI_TILES AND NOT USE_NATIVE_TILES)
+    if(WIN32 AND JAVA_HOME)
+        # Convert to CMake-style paths and resolve \.. to avoid escape issues in FindJNI
+        # (Windows paths C:\Program Files\... break foreach parsing in FindJNI.cmake)
+        file(TO_CMAKE_PATH "${JAVA_HOME}" JAVA_HOME)
+        get_filename_component(JAVA_HOME "${JAVA_HOME}" REALPATH)
+    endif()
     find_package(JNI REQUIRED)
     include_directories(${JNI_INCLUDE_DIRS})
     if(WIN32)
